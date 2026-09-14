@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+
+<!-- Lets the switch in the app do what "sudo gpsctl" does from a terminal.
+
+     allow_active is "yes", so the person at the phone is not asked for a
+     password - the same decision, for the same two reasons, as the modem
+     switch in the sibling project.
+
+     The first is that there is nobody to ask. Phosh registers no polkit
+     authentication agent, so an action set to auth_admin has no way to put a
+     prompt on the screen: pkexec would simply fail and the switch would be a
+     control that does nothing.
+
+     The second is the size of what it grants. This writes two keys in one
+     section of geoclue.conf and starts or stops one service. The account it
+     is granted to could already, on this phone as found, write that file
+     directly - it was owned by the login user. What gpsctl adds on top of
+     that is a way to do it that also puts the proxy behind it, and a refusal
+     to be pointed anywhere else: as root it rejects every GPSCTL_* override
+     outright, so this cannot be turned into a general-purpose file editor.
+
+     Not allow_any and not allow_inactive: a remote session or a switched-away
+     seat has no business deciding where this phone says it is. -->
+<policyconfig>
+  <vendor>misc-de</vendor>
+  <vendor_url>https://github.com/misc-de/furios_gps_fix</vendor_url>
+
+  <action id="de.misc-de.gpsctl.switch">
+    <description>Switch the location filter between the shipped state and the repair</description>
+    <description xml:lang="de">Standort-Filter zwischen Auslieferungszustand und Reparatur umschalten</description>
+    <message>Changing how this phone works out where it is</message>
+    <message xml:lang="de">Es wird geändert, wie dieses Telefon seinen Standort bestimmt</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/gpsctl</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

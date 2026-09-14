@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+"""Stands between geoclue's Wi-Fi source and BeaconDB, and throws away the
+one kind of answer that is worse than no answer at all.
+
+Ask a geolocation service where you are and hand it no Wi-Fi it recognises,
+and it does not say "I do not know". It answers with the location of the IP
+address the question arrived from - on mobile data, the carrier's NAT exit,
+which on this phone is a fixed point tens to hundreds of kilometres away. The
+answer is marked: ichnaea's API, which BeaconDB speaks, sets
+
+    "fallback": "ipf"
+
+next to the position. geoclue does not look at that field. It takes the
+position, and because the Wi-Fi source usually answers long before GNSS has a
+fix, that is what every app on the phone is told first.
+
+So: forward the question unchanged, look at the answer, and turn the marked
+ones into an HTTP error. geoclue's web source treats a non-2xx as "this source
+has nothing", which is the truth of the matter - and leaves the GNSS fix from
+the hybris source as the only thing anybody is told.
+
+Nothing is cached, nothing is stored, nothing is logged about *where* anybody
+is: the counters below say how many answers were of which kind, and that is
+all this program remembers between two requests.
+"""
+
+import json
+import os
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+VERSION = "0.1.0"
+
+# Everything configurable is an environment variable, because this runs from a
+# unit file where that is the one thing easy to override, and because the tests
+# need to point it at a server of their own.
+UPSTREAM = os.environ.get("FURIOS_GPS_UPSTREAM", "https://api.beacondb.net/v1/geolocate")
+BIND = os.environ.get("FURIOS_GPS_BIND", "127.0.0.1")
+PORT = int(os.environ.get("FURIOS_GPS_PORT", "8765"))
+PATH = os.environ.get("FURIOS_GPS_PATH", "/v1/geolocate")
+TIMEOUT = float(os.environ.get("FURIOS_GPS_TIMEOUT", "10"))
+COUNTERS = os.environ.get("FURIOS_GPS_COUNTERS", "/run/furios-gps-proxy/counters")
+
+# A geolocate query is a list of the Wi-Fi and cell towers in earshot. A large
+# one is a few kilobytes. This is not a defence against anything - the socket
+# only listens on loopback - it is a refusal to allocate without a limit.
+MAX_BODY = 256 * 1024
+
+# An answer that is not an IP fallback can still be a very wide one, and the
+# point of this program is that the width is not what it judges by. It counts
+# them anyway: if BeaconDB ever stops setting the marker, this counter moving
+# while "rejected" stays at zero is what would show it.
+WIDE_METRES = 40000
+
+
+class Counters:
+    """What this proxy has seen since it started, as a file anyone can read.
+
+    In /run, so it goes away with the reboot it describes, and written whole
+    each time rather than appended to - it is a gauge, not a log.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.started = time.time()
+        self.n = {"asked": 0, "located": 0, "rejected": 0, "wide": 0,
+                  "not_found": 0, "upstream_error": 0, "bad_request": 0}
+        self.last_reject = 0.0
+        self.write()
+
+    def bump(self, key, wide=False):
+        with self.lock:
+            self.n[key] = self.n.get(key, 0) + 1
+            if wide:
+                self.n["wide"] += 1
+            if key == "rejected":
+                self.last_reject = time.time()
+            self.write_locked()
+
+    def write(self):
+        with self.lock:
+            self.write_locked()
+
+    def write_locked(self):
+        if not self.path:
+            return
+        lines = [f"version: {VERSION}",
+                 f"started: {int(self.started)}",
+                 f"upstream: {UPSTREAM}"]
+        lines += [f"{k}: {v}" for k, v in sorted(self.n.items())]
+        lines.append(f"last_reject: {int(self.last_reject)}")
+        text = "\n".join(lines) + "\n"
+        try:
+            tmp = self.path + ".new"
+            with open(tmp, "w") as fh:
+                fh.write(text)
+            os.replace(tmp, self.path)
+            os.chmod(self.path, 0o644)
+        except OSError:
+            # No counters is a worse status page, not a broken proxy. The one
+            # thing this must never do is fail a geolocation request because
+            # it could not write a statistic.
+            self.path = None
+
+
+def log(msg):
+    """One line, to the journal. No coordinates, ever - what is interesting
+    here is the kind of answer, and printing the position would put every
+    place this phone has been into a file that outlives the reboot."""
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+
+def is_ip_fallback(data):
+    """The single rule this whole project exists for.
+
+    ichnaea sets "fallback" to "ipf" when the position was derived from the
+    source IP address instead of from the transmitters in the query. Anything
+    else - absent, null, "lacf" for the cell-area fallback - is a real
+    measurement of something the phone can actually hear.
+    """
+    return isinstance(data, dict) and data.get("fallback") == "ipf"
+
+
+def accuracy_of(data):
+    try:
+        acc = data.get("accuracy")
+        return float(acc) if acc is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "furios-gps-proxy/" + VERSION
+    sys_version = ""
+
+    def reply(self, status, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        counters = self.server.counters
+
+        if self.path.split("?", 1)[0] != PATH:
+            counters.bump("bad_request")
+            self.reply(404, {"error": "no such endpoint"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            counters.bump("bad_request")
+            self.reply(413, {"error": "request too large"})
+            return
+
+        body = self.rfile.read(length) if length else b"{}"
+        counters.bump("asked")
+
+        # Only the content type travels upstream. Whatever else geoclue sent -
+        # and whatever a future version of it might send - is none of
+        # BeaconDB's business, and passing headers through unread is how a
+        # proxy becomes a way to send something it never meant to.
+        req = urllib.request.Request(
+            UPSTREAM, data=body,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "furios-gps-proxy/" + VERSION},
+            method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
+                status, raw = res.status, res.read()
+        except urllib.error.HTTPError as err:
+            # A 404 from ichnaea means "nothing matched", which is a perfectly
+            # good answer and the one geoclue should hear unchanged.
+            raw = err.read()
+            status = err.code
+            if status == 404:
+                counters.bump("not_found")
+                self.reply(404, {"error": "not found"})
+                return
+            counters.bump("upstream_error")
+            log(f"upstream said {status}")
+            self.reply(502, {"error": "upstream_failed", "status": status})
+            return
+        except Exception as err:                       # noqa: BLE001
+            counters.bump("upstream_error")
+            log(f"upstream unreachable: {type(err).__name__}: {err}")
+            self.reply(502, {"error": "upstream_failed",
+                             "message": f"{type(err).__name__}: {err}"})
+            return
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:                              # noqa: BLE001
+            counters.bump("upstream_error")
+            log("upstream sent something that is not JSON")
+            self.reply(502, {"error": "invalid_upstream_json"})
+            return
+
+        if is_ip_fallback(data):
+            counters.bump("rejected")
+            acc = accuracy_of(data)
+            log("rejected an IP fallback"
+                + (f" (radius {int(acc)} m)" if acc else ""))
+            self.reply(404, {"error": "rejected_ipf_fallback"})
+            return
+
+        acc = accuracy_of(data)
+        wide = acc is not None and acc > WIDE_METRES
+        counters.bump("located", wide=wide)
+        if wide:
+            # Not rejected: the marker is what decides, and this is a real
+            # answer about real transmitters. Worth a line, because a run of
+            # these with no rejections is what a silently dropped marker would
+            # look like.
+            log(f"passed a {int(acc)} m answer that is not marked as an IP fallback")
+        self.reply(status, data)
+
+    def log_message(self, fmt, *args):
+        # BaseHTTPRequestHandler's own logging prints the request line of every
+        # call. On loopback, from one client, that is noise in the journal for
+        # the whole uptime of the phone - and the interesting lines are printed
+        # by hand above.
+        pass
+
+
+def self_test():
+    """Proves the rule without a network, a phone, or BeaconDB having to be up.
+
+    Runs the real handler against a stub upstream, so what is checked is the
+    code that serves geoclue and not a second copy of the idea.
+    """
+    import http.server
+
+    answers = {
+        "/ipf": (200, {"location": {"lat": 52.5, "lng": 13.4},
+                       "accuracy": 120000.0, "fallback": "ipf"}),
+        "/real": (200, {"location": {"lat": 52.5, "lng": 13.4}, "accuracy": 35.0}),
+        "/wide": (200, {"location": {"lat": 52.5, "lng": 13.4}, "accuracy": 90000.0}),
+        "/lacf": (200, {"location": {"lat": 52.5, "lng": 13.4},
+                        "accuracy": 5000.0, "fallback": "lacf"}),
+        "/none": (404, {"error": {"message": "Not found"}}),
+        "/junk": (200, None),
+    }
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            status, payload = answers[self.path]
+            body = b"not json" if payload is None else json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    stub = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{stub.server_address[1]}"
+
+    failed = 0
+
+    def case(name, upstream_path, want_status, want_error=None):
+        nonlocal failed
+        global UPSTREAM
+        UPSTREAM = base + upstream_path
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        srv.counters = Counters(None)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{srv.server_address[1]}{PATH}"
+        req = urllib.request.Request(url, data=b'{"wifiAccessPoints":[]}',
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as res:
+                got, body = res.status, res.read()
+        except urllib.error.HTTPError as err:
+            got, body = err.code, err.read()
+        srv.shutdown()
+
+        detail = ""
+        good = got == want_status
+        if good and want_error is not None:
+            try:
+                good = json.loads(body).get("error") == want_error
+                detail = f" (error {json.loads(body).get('error')!r})"
+            except Exception:                          # noqa: BLE001
+                good, detail = False, " (unreadable body)"
+        if good:
+            print(f"  \033[32mok\033[0m   {name}")
+        else:
+            failed += 1
+            print(f"  \033[31mFAIL\033[0m {name}: expected {want_status}"
+                  f"{'/' + str(want_error) if want_error else ''}, got {got}{detail}")
+
+    case("an IP fallback is refused", "/ipf", 404, "rejected_ipf_fallback")
+    case("a real Wi-Fi fix is passed through", "/real", 200)
+    case("a wide but unmarked answer is passed through", "/wide", 200)
+    case("the cell-area fallback is not an IP fallback", "/lacf", 200)
+    case("nothing found stays nothing found", "/none", 404, "not found")
+    case("an unreadable answer is an upstream error", "/junk", 502)
+
+    # And the endpoint itself: geoclue is the only client, but a proxy that
+    # answers on any path it is asked about is a proxy somebody else can use.
+    global UPSTREAM
+    UPSTREAM = base + "/real"
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv.counters = Counters(None)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{srv.server_address[1]}/somewhere-else",
+                data=b"{}", headers={"Content-Type": "application/json"}),
+            timeout=5)
+        print("  \033[31mFAIL\033[0m another path is refused: it answered")
+        failed += 1
+    except urllib.error.HTTPError as err:
+        if err.code == 404:
+            print("  \033[32mok\033[0m   another path is refused")
+        else:
+            print(f"  \033[31mFAIL\033[0m another path is refused: got {err.code}")
+            failed += 1
+    srv.shutdown()
+
+    return 1 if failed else 0
+
+
+def main():
+    if "--self-test" in sys.argv:
+        return self_test()
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print(f"furios-gps-proxy {VERSION}")
+        return 0
+
+    directory = os.path.dirname(COUNTERS)
+    if directory:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError:
+            pass
+
+    class Server(ThreadingHTTPServer):
+        # Without this, restarting the service inside the TIME_WAIT of the
+        # last connection fails to bind - and a proxy that is down is a phone
+        # that has no Wi-Fi location at all until somebody notices.
+        allow_reuse_address = True
+        daemon_threads = True
+
+    try:
+        srv = Server((BIND, PORT), Handler)
+    except OSError as err:
+        log(f"cannot listen on {BIND}:{PORT}: {err}")
+        return 1
+    srv.counters = Counters(COUNTERS)
+
+    log(f"furios-gps-proxy {VERSION} on {BIND}:{PORT}{PATH} -> {UPSTREAM}")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    socket.setdefaulttimeout(TIMEOUT)
+    sys.exit(main())

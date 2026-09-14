@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Geolocation proxy that refuses positions derived from the IP address
+Documentation=file:/usr/share/doc/furios-gps-fix/README.md
+# It calls out to the geolocation service, so it wants a network - but it must
+# not wait for one. geoclue asks whenever an app asks it, which on this phone
+# can be seconds after boot, and a proxy that is not listening yet is a lookup
+# that fails. Failing is safe (geoclue simply has no Wi-Fi position) but it is
+# still worse than answering.
+After=network.target
+Wants=network.target
+
+[Service]
+ExecStart=/usr/bin/furios-gps-proxy
+Restart=always
+RestartSec=3
+# The counters live here, and nowhere else - it is a gauge of this boot, so it
+# belongs in /run and goes away with the boot it describes.
+RuntimeDirectory=furios-gps-proxy
+RuntimeDirectoryMode=0755
+# No account of its own to create or to leave behind. It keeps nothing on disk
+# and it answers only on loopback, so there is nothing for an identity to own.
+DynamicUser=yes
+# Two things go in (a query from loopback) and one comes out (a query to the
+# geolocation service). Everything below is the difference between that and
+# what a process on this phone could otherwise do.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+# stdout is the journal, and the only thing written there is what kind of
+# answer came back - never a position.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

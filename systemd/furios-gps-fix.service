@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Put geoclue's Wi-Fi source behind the IP-fallback filter
+Documentation=file:/usr/share/doc/furios-gps-fix/README.md
+# geoclue reads its config once, at start. Writing it afterwards means the
+# first lookup of the boot still goes wherever the old file said.
+Before=geoclue.service
+# Not Requires: a phone where geoclue is not being started at all has nothing
+# to filter, and this should stay out of the way.
+Wants=geoclue.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --no-restart because geoclue is started right after this, by the ordering
+# above. Restarting a service from inside a unit it is ordered against is how
+# the sibling audio project once built a boot deadlock that survived the
+# reboot, and this does not repeat it.
+ExecStart=/usr/bin/gpsctl boot --quiet --no-restart
+# A filter that cannot be put in place must not keep the boot from finishing.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

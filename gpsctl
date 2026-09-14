@@ -1,0 +1,639 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Puts geoclue's Wi-Fi source behind a proxy that refuses IP-derived positions,
+# takes it back out again, and says honestly which of the two the phone is in.
+#
+# The whole change is two keys in one section of geoclue.conf and one service.
+# Everything else in that file - the agent whitelist, the GNSS source, which
+# applications may ask at all - belongs to somebody else and is never touched,
+# not on apply and not on revert.
+set -u
+
+VERSION=0.1.0
+
+# As root, an environment variable that redirects where this writes is an
+# arbitrary-file edit with a friendly name. The tests need the overrides, so
+# they run unprivileged - which is possible precisely because apply tests
+# whether it can write the files rather than testing id -u.
+if [ "$(id -u)" -eq 0 ]; then
+    for v in GPSCTL_CONF GPSCTL_PROFILE GPSCTL_SHIPPED GPSCTL_COUNTERS \
+             GPSCTL_UNIT GPSCTL_PROXY_URL GPSCTL_LEGACY_UNIT; do
+        if [ -n "${!v:-}" ]; then
+            echo "refusing to honour $v as root - that would be an arbitrary-file edit" >&2
+            exit 3
+        fi
+    done
+fi
+
+CONF=${GPSCTL_CONF:-/etc/geoclue/geoclue.conf}
+PROFILE_FILE=${GPSCTL_PROFILE:-/etc/furios-gps-fix.profile}
+# What [wifi] looked like before this project first touched it. Written once,
+# on the first apply, and read by revert. The constants below are what FuriOS
+# ships and are only the fallback: a phone that was already configured by hand
+# gets its own values back, not ours.
+SHIPPED_FILE=${GPSCTL_SHIPPED:-/etc/furios-gps-fix.shipped}
+COUNTERS=${GPSCTL_COUNTERS:-/run/furios-gps-proxy/counters}
+UNIT=${GPSCTL_UNIT:-furios-gps-proxy.service}
+PROXY_URL=${GPSCTL_PROXY_URL:-http://127.0.0.1:8765/v1/geolocate}
+
+# FuriOS ships the Wi-Fi source switched OFF, with BeaconDB's URL sitting in
+# the file unused. That is not a neutral state and the README says so at
+# length: geoclue's own comment above the key explains that with the Wi-Fi
+# source and the static source both disabled, "a GeoIP-only source will be used
+# instead". The shipped phone therefore has no way of being anywhere except
+# where its IP address says it is.
+SHIPPED_URL=https://api.beacondb.net/v1/geolocate
+SHIPPED_ENABLE=false
+
+PROFILES="fixed shipped"
+
+# The hand-rolled service this project grew out of. Both would bind port 8765
+# and the loser dies at every boot, so apply takes the old one out of the way.
+LEGACY_UNIT=${GPSCTL_LEGACY_UNIT:-beacondb-proxy.service}
+
+QUIET=0
+NO_RESTART=0
+
+if [ -t 1 ]; then
+    C_OK=$'\033[32m'; C_BAD=$'\033[31m'; C_WARN=$'\033[33m'; C_B=$'\033[1m'; C_0=$'\033[0m'
+else
+    C_OK=; C_BAD=; C_WARN=; C_B=; C_0=
+fi
+
+say()   { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+ok()    { [ "$QUIET" -eq 1 ] || printf '  %sok%s    %s\n' "$C_OK" "$C_0" "$*"; }
+skip()  { [ "$QUIET" -eq 1 ] || printf '  --    %s\n' "$*"; }
+warn()  { printf '  %swarn%s  %s\n' "$C_WARN" "$C_0" "$*" >&2; }
+bad()   { printf '  %sFAIL%s  %s\n' "$C_BAD" "$C_0" "$*" >&2; }
+head_() { [ "$QUIET" -eq 1 ] || printf '\n%s== %s%s\n' "$C_B" "$*" "$C_0"; }
+
+# --- reading and writing one key of one section -----------------------------
+#
+# geoclue.conf is a GKeyFile, and there is no tool on this phone that edits one
+# from a shell script. What follows is deliberately the smallest thing that
+# can: it finds the section, changes the one key inside it, and copies every
+# other byte of the file through untouched - including the comments, which in
+# this particular file are the documentation for what the keys mean.
+
+conf_get() {
+    # conf_get <section> <key>   -> the value, or nothing at all
+    local section=$1 key=$2
+    [ -f "$CONF" ] || return 1
+    awk -v want="[$section]" -v key="$key" '
+        /^[[:space:]]*\[/ { inside = ($0 ~ "^[[:space:]]*\\" want "[[:space:]]*$"); next }
+        !inside { next }
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (line ~ /^[#;]/) next
+            eq = index(line, "=")
+            if (eq == 0) next
+            k = substr(line, 1, eq - 1)
+            v = substr(line, eq + 1)
+            gsub(/[[:space:]]+$/, "", k)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            # Values may be quoted - the shipped file quotes the SUPL server
+            # and not the Wi-Fi URL, so both have to read the same way here.
+            gsub(/^"|"$/, "", v)
+            if (k == key) print v
+        }' "$CONF"
+}
+
+conf_set() {
+    # conf_set <section> <key> <value>
+    #
+    # Writes through a temporary file in the same directory and renames it
+    # over the original, so a geoclue starting in the middle of this reads
+    # either the old file or the new one and never half of either.
+    local section=$1 key=$2 value=$3 tmp
+    tmp=$(mktemp "$(dirname "$CONF")/.gpsctl.XXXXXX") || return 1
+    awk -v want="[$section]" -v key="$key" -v value="$value" '
+        function emit() { if (!done) { print key "=" value; done = 1 } }
+        /^[[:space:]]*\[/ {
+            # Leaving the section without having seen the key: write it here,
+            # at the end of the section it belongs to.
+            if (inside) emit()
+            inside = ($0 ~ "^[[:space:]]*\\" want "[[:space:]]*$")
+            seen = seen || inside
+            print; next
+        }
+        {
+            if (inside) {
+                line = $0
+                sub(/^[[:space:]]+/, "", line)
+                eq = index(line, "=")
+                if (eq > 0 && line !~ /^[#;]/) {
+                    k = substr(line, 1, eq - 1)
+                    gsub(/[[:space:]]+$/, "", k)
+                    if (k == key) { emit(); next }
+                }
+            }
+            print
+        }
+        END {
+            if (inside) emit()
+            else if (!seen) { print ""; print want; print key "=" value }
+        }' "$CONF" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+    # The file belongs to /etc and to the geoclue package, and geoclue reads it
+    # as root. It was found owned by the login user on this phone, which means
+    # the unprivileged account could point the geolocation lookup anywhere it
+    # liked; writing it back as root:root is part of the repair, not a side
+    # effect. See FINDINGS.md.
+    chmod 644 "$tmp"
+    [ "$(id -u)" -eq 0 ] && chown root:root "$tmp"
+    mv -f "$tmp" "$CONF"
+}
+
+# --- what state the phone is in ---------------------------------------------
+
+wifi_state() {
+    # applied | missing | partial
+    local url enable
+    [ -f "$CONF" ] || { echo absent; return; }
+    url=$(conf_get wifi url)
+    enable=$(conf_get wifi enable)
+    if [ "$url" = "$PROXY_URL" ] && [ "$enable" = true ]; then
+        echo applied
+    elif [ "$url" = "$PROXY_URL" ] || [ "$enable" = true ]; then
+        echo partial
+    else
+        echo missing
+    fi
+}
+
+unit_installed() { systemctl cat "$UNIT" >/dev/null 2>&1; }
+
+proxy_state() {
+    # applied | missing | partial | absent
+    unit_installed || { echo absent; return; }
+    local enabled=no active=no
+    systemctl is-enabled --quiet "$UNIT" 2>/dev/null && enabled=yes
+    systemctl is-active --quiet "$UNIT" 2>/dev/null && active=yes
+    if [ "$enabled$active" = yesyes ]; then echo applied
+    elif [ "$enabled$active" = nono ]; then echo missing
+    else echo partial
+    fi
+}
+
+recorded_profile() {
+    local p
+    p=$(cat "$PROFILE_FILE" 2>/dev/null | tr -d '[:space:]')
+    # No file means fixed: a phone that has this package installed and has
+    # never been told otherwise is meant to be repaired.
+    [ -z "$p" ] && { echo fixed; return; }
+    case " $PROFILES " in
+        *" $p "*) echo "$p" ;;
+        *)        echo unknown ;;
+    esac
+}
+
+actual_profile() {
+    local w p
+    w=$(wifi_state)
+    p=$(proxy_state)
+    # No unit at all is not "half installed" - it is a phone where only the
+    # config half of this project exists, which is what running straight from
+    # the work tree looks like.
+    [ "$p" = absent ] && p=missing
+    if [ "$w" = applied ] && [ "$p" = applied ]; then echo fixed
+    elif [ "$w" = missing ] && [ "$p" = missing ]; then echo shipped
+    else echo mixed
+    fi
+}
+
+# What [wifi] looked like before we first touched it.
+remember_shipped() {
+    [ -f "$SHIPPED_FILE" ] && return 0
+    [ -f "$CONF" ] || return 0
+    local url enable
+    url=$(conf_get wifi url)
+    enable=$(conf_get wifi enable)
+    # Never record our own proxy as the state to go back to. That would make
+    # revert a no-op for ever after, and it is exactly what happens if this
+    # package is installed onto a phone that already had the hand-rolled
+    # version of it running.
+    [ "$url" = "$PROXY_URL" ] && url=$SHIPPED_URL
+    { printf 'url=%s\n' "${url:-$SHIPPED_URL}"
+      printf 'enable=%s\n' "${enable:-$SHIPPED_ENABLE}"; } > "$SHIPPED_FILE" 2>/dev/null || return 0
+    chmod 644 "$SHIPPED_FILE" 2>/dev/null || true
+}
+
+shipped_value() {
+    # shipped_value url|enable
+    local key=$1 v
+    v=$(sed -n "s/^$key=//p" "$SHIPPED_FILE" 2>/dev/null | head -1)
+    if [ -n "$v" ]; then printf '%s\n' "$v"
+    elif [ "$key" = url ]; then printf '%s\n' "$SHIPPED_URL"
+    else printf '%s\n' "$SHIPPED_ENABLE"; fi
+}
+
+need_write() {
+    local what=$1 problem=
+    if [ -e "$CONF" ] && [ ! -w "$CONF" ]; then problem=$CONF
+    elif [ ! -e "$CONF" ]; then problem="$CONF (not there)"
+    fi
+    [ -w "$(dirname "$PROFILE_FILE")" ] || problem="${problem:+$problem and }$(dirname "$PROFILE_FILE")"
+    [ -z "$problem" ] && return 0
+    echo "cannot write $problem" >&2
+    [ "$(id -u)" -ne 0 ] && echo "try: sudo $0 $what" >&2
+    exit 1
+}
+
+# geoclue is dbus-activated and exits when nobody is asking, so there is
+# usually nothing running to restart. try-restart is the honest verb: restart
+# it if it is up, and otherwise leave it to be started on demand with the
+# config that is now on disk.
+kick_geoclue() {
+    [ "$NO_RESTART" -eq 1 ] && { skip "geoclue left alone (--no-restart)"; return 0; }
+    if systemctl is-active --quiet geoclue 2>/dev/null; then
+        systemctl try-restart geoclue >/dev/null 2>&1 \
+            && ok "geoclue restarted - it re-reads the config at start" \
+            || warn "could not restart geoclue - it will pick this up when it next starts"
+    else
+        skip "geoclue is not running (it starts on demand, with the new config)"
+    fi
+}
+
+# --- apply / revert ---------------------------------------------------------
+
+cmd_apply() {
+    local failed=0
+    need_write apply
+    head_ "geoclue"
+    remember_shipped
+
+    case "$(wifi_state)" in
+        applied) skip "[wifi] already points at the proxy, and is enabled" ;;
+        absent)  bad "$CONF not found - is geoclue installed?"; return 1 ;;
+        *)
+            if conf_set wifi url "$PROXY_URL" && conf_set wifi enable true; then
+                ok "[wifi] url = $PROXY_URL"
+                ok "[wifi] enable = true"
+            else
+                bad "could not write $CONF"; failed=1
+            fi ;;
+    esac
+
+    head_ "the proxy"
+    # The service this project replaces. Two of them cannot both have port
+    # 8765, and the one that loses simply dies at boot.
+    if systemctl cat "$LEGACY_UNIT" >/dev/null 2>&1; then
+        if systemctl is-enabled --quiet "$LEGACY_UNIT" 2>/dev/null \
+           || systemctl is-active --quiet "$LEGACY_UNIT" 2>/dev/null; then
+            systemctl disable --now "$LEGACY_UNIT" >/dev/null 2>&1 \
+                && warn "$LEGACY_UNIT was running - stopped and disabled it, it wants the same port" \
+                || warn "$LEGACY_UNIT is in the way and could not be stopped"
+        fi
+    fi
+
+    if ! unit_installed; then
+        skip "$UNIT is not installed - config only (install.sh puts it there)"
+    else
+        case "$(proxy_state)" in
+            applied) skip "$UNIT already enabled and running" ;;
+            *)
+                if systemctl enable --now "$UNIT" >/dev/null 2>&1; then
+                    ok "$UNIT enabled and started"
+                else
+                    bad "could not start $UNIT - see: systemctl status $UNIT"; failed=1
+                fi ;;
+        esac
+        # An upgrade installs new code and leaves the old process running.
+        systemctl try-restart "$UNIT" >/dev/null 2>&1 || true
+    fi
+
+    head_ "geoclue re-reads its config"
+    kick_geoclue
+    return $failed
+}
+
+cmd_revert() {
+    local failed=0
+    need_write revert
+    head_ "geoclue"
+    case "$(wifi_state)" in
+        missing) skip "[wifi] is already what the phone shipped with" ;;
+        absent)  skip "$CONF not found - nothing to undo" ;;
+        *)
+            if conf_set wifi url "$(shipped_value url)" \
+               && conf_set wifi enable "$(shipped_value enable)"; then
+                ok "[wifi] url = $(shipped_value url)"
+                ok "[wifi] enable = $(shipped_value enable)"
+            else
+                bad "could not write $CONF"; failed=1
+            fi ;;
+    esac
+
+    head_ "the proxy"
+    if ! unit_installed; then
+        skip "$UNIT is not installed"
+    else
+        case "$(proxy_state)" in
+            missing) skip "$UNIT already stopped and disabled" ;;
+            *)
+                systemctl disable --now "$UNIT" >/dev/null 2>&1 \
+                    && ok "$UNIT stopped and disabled" \
+                    || { bad "could not stop $UNIT"; failed=1; } ;;
+        esac
+    fi
+
+    head_ "geoclue re-reads its config"
+    kick_geoclue
+    [ "$(shipped_value enable)" = false ] && {
+        warn "this is the state the phone shipped in, not a private one:"
+        warn "     with the Wi-Fi source off, geoclue falls back to locating"
+        warn "     the phone by its IP address, and nothing filters that."
+    }
+    return $failed
+}
+
+# --- profiles ---------------------------------------------------------------
+
+cmd_profile() {
+    local rec act
+    rec=$(recorded_profile)
+    act=$(actual_profile)
+    printf 'recorded: %s\n' "$rec"
+    printf 'actual:   %s\n' "$act"
+    if [ "$rec" = unknown ]; then
+        warn "$PROFILE_FILE holds something this does not understand - leaving it alone"
+        return 1
+    fi
+    if [ "$act" = mixed ]; then
+        warn "the config and the proxy do not agree about which state this is"
+        warn "     settle it with: sudo gpsctl set $rec"
+        return 1
+    fi
+    if [ "$act" != "$rec" ]; then
+        say ""
+        say "This is a \"try\": the next boot returns to \"$rec\"."
+    fi
+    return 0
+}
+
+cmd_switch() {
+    local want=${1:-} remember=$2 rc=0
+    case " $PROFILES " in
+        *" $want "*) ;;
+        *) echo "unknown profile: ${want:-(none)} (known: $PROFILES)" >&2; exit 2 ;;
+    esac
+    need_write "$([ "$remember" = 1 ] && echo set || echo try) $want"
+
+    if [ "$remember" = 1 ]; then
+        printf '%s\n' "$want" > "$PROFILE_FILE" || {
+            bad "could not record the profile in $PROFILE_FILE"; return 1; }
+        chmod 644 "$PROFILE_FILE" 2>/dev/null || true
+    fi
+
+    case "$want" in
+        fixed)   cmd_apply  || rc=1 ;;
+        shipped) cmd_revert || rc=1 ;;
+    esac
+
+    say ""
+    if [ "$remember" = 1 ]; then
+        say "Recorded: $want. This survives a reboot and a package update."
+    else
+        say "Not recorded: the next boot returns to \"$(recorded_profile)\"."
+    fi
+    return $rc
+}
+
+# What the boot unit runs: make the phone match what was recorded, and nothing
+# else. It does not enable or disable units beyond what apply and revert do -
+# enablement is already persistent, and a oneshot that reaches into services
+# other units are ordered against is how the sibling project once built a
+# deadlock that survived the reboot.
+cmd_boot() {
+    local rec
+    rec=$(recorded_profile)
+    case "$rec" in
+        unknown)
+            warn "$PROFILE_FILE holds something this does not understand - doing nothing"
+            return 0 ;;
+        shipped)
+            [ "$(actual_profile)" = shipped ] && {
+                say "Recorded profile is shipped - nothing to undo."; return 0; }
+            say "Recorded profile is shipped - taking the filter back out."
+            cmd_revert; return $? ;;
+        *)
+            cmd_apply; return $? ;;
+    esac
+}
+
+# --- status -----------------------------------------------------------------
+
+counter() {
+    sed -n "s/^$1: //p" "$COUNTERS" 2>/dev/null | head -1
+}
+
+cmd_status() {
+    local failed=0 url enable
+
+    head_ "geoclue"
+    if [ ! -f "$CONF" ]; then
+        bad "$CONF not found - is geoclue installed?"
+        return 1
+    fi
+    url=$(conf_get wifi url)
+    enable=$(conf_get wifi enable)
+
+    if [ "$enable" = true ]; then
+        ok "[wifi] enable = true"
+    else
+        bad "[wifi] enable = ${enable:-(unset)} - with no Wi-Fi source, geoclue locates by IP address alone"
+        failed=1
+    fi
+    if [ "$url" = "$PROXY_URL" ]; then
+        ok "[wifi] url = $url"
+    elif [ -n "$url" ]; then
+        bad "[wifi] url = $url - answers go to geoclue unfiltered"
+        failed=1
+    else
+        bad "[wifi] url is unset"
+        failed=1
+    fi
+
+    # Not ours to change, and the reason the filter is affordable at all: if
+    # GNSS were off too, refusing the IP position would leave the phone with
+    # no position of any kind.
+    if [ "$(conf_get hybris enable)" = true ]; then
+        ok "[hybris] enable = true - there is a real GNSS fix to fall back on"
+    else
+        warn "[hybris] is not enabled - with the Wi-Fi answer filtered there may"
+        warn "     be no position at all. This project does not change that key."
+    fi
+
+    head_ "the proxy"
+    if ! unit_installed; then
+        bad "$UNIT is not installed"
+        failed=1
+    else
+        systemctl is-enabled --quiet "$UNIT" 2>/dev/null \
+            && ok "$UNIT enabled (comes back at boot)" \
+            || { bad "$UNIT is not enabled - it will not be there after a reboot"; failed=1; }
+        if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+            ok "$UNIT running"
+        else
+            bad "$UNIT is not running - every Wi-Fi lookup fails"
+            failed=1
+        fi
+    fi
+    if systemctl cat "$LEGACY_UNIT" >/dev/null 2>&1 \
+       && systemctl is-enabled --quiet "$LEGACY_UNIT" 2>/dev/null; then
+        bad "$LEGACY_UNIT is still enabled and wants the same port"
+        failed=1
+    fi
+
+    head_ "what it has seen"
+    if [ -r "$COUNTERS" ]; then
+        local asked located rejected wide notfound
+        asked=$(counter asked); located=$(counter located)
+        rejected=$(counter rejected); wide=$(counter wide); notfound=$(counter not_found)
+        say "since boot: ${asked:-0} asked, ${located:-0} located, ${rejected:-0} IP fallbacks rejected"
+        [ "${notfound:-0}" -gt 0 ] 2>/dev/null && say "            ${notfound} answered \"nothing found\""
+        if [ "${wide:-0}" -gt 0 ] 2>/dev/null; then
+            warn "${wide} answer(s) wider than 40 km came through unmarked - if this"
+            warn "     keeps rising while \"rejected\" stays at 0, look at the marker"
+        fi
+        [ "${rejected:-0}" = 0 ] && [ "${asked:-0}" != 0 ] 2>/dev/null \
+            && skip "nothing rejected yet - that is what a phone on Wi-Fi looks like"
+    elif [ "$(proxy_state)" = applied ]; then
+        skip "no counters at $COUNTERS yet - it writes them on the first request"
+    else
+        skip "the proxy is not running, so there is nothing to count"
+    fi
+
+    head_ "profile"
+    cmd_profile || failed=1
+    return $failed
+}
+
+# status, plus the things that need the proxy to actually be asked something.
+# Deliberately nothing that leaves the phone: the self-test runs the real
+# handler against a stub upstream, so it proves the rule without telling
+# BeaconDB that this phone exists. "gpsctl probe" is the one that goes out, and
+# it says so first.
+cmd_check() {
+    local failed=0
+    cmd_status || failed=1
+
+    head_ "the rule itself"
+    local proxy_bin
+    proxy_bin=$(command -v furios-gps-proxy 2>/dev/null) \
+        || proxy_bin="$(dirname "$(readlink -f "$0")")/tools/furios-gps-proxy"
+    if [ -x "$proxy_bin" ]; then
+        "$proxy_bin" --self-test || failed=1
+    else
+        bad "furios-gps-proxy not found - cannot check the rule"
+        failed=1
+    fi
+
+    head_ "is anything listening on the port"
+    local port=${PROXY_URL#*://}; port=${port#*:}; port=${port%%/*}
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn 2>/dev/null | grep -qE "127\.0\.0\.1:$port\b"; then
+            ok "127.0.0.1:$port accepts connections"
+        else
+            bad "nothing is listening on 127.0.0.1:$port"
+            failed=1
+        fi
+    else
+        skip "ss not installed - cannot look at the port"
+    fi
+    return $failed
+}
+
+# The only command here that sends anything anywhere. One real query, with no
+# transmitters in it, which is precisely the query BeaconDB answers with an IP
+# fallback - so it shows the rule working on the real service.
+cmd_probe() {
+    local port url
+    url=$PROXY_URL
+    say "This sends one geolocation query through the proxy to the real service."
+    say "It carries no Wi-Fi and no cell data - only the fact that this phone's"
+    say "IP address asked something. That is the query the filter is about."
+    say ""
+    command -v curl >/dev/null 2>&1 || { bad "curl is not installed"; return 1; }
+
+    local code body
+    body=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$url" \
+        -H 'Content-Type: application/json' --data '{"wifiAccessPoints":[]}' 2>&1) || {
+        bad "the proxy did not answer: $body"; return 1; }
+    code=$body
+    case "$code" in
+        404) ok "the service answered with an IP fallback, and the proxy refused it"
+             say ""
+             say "That is the whole project working: geoclue sees no position here,"
+             say "so the GNSS fix is the only thing it has to tell anybody." ;;
+        200) warn "the service returned a position for a query with nothing in it,"
+             warn "     and did not mark it as an IP fallback. Worth a look:"
+             warn "     journalctl -u $UNIT -n 20" ;;
+        502) bad "the service could not be reached - is there a network?" ; return 1 ;;
+        *)   warn "unexpected answer: HTTP $code" ;;
+    esac
+    return 0
+}
+
+usage() {
+    cat <<USAGE
+gpsctl $VERSION - keeps geoclue from believing the carrier's IP address
+
+  gpsctl status          what is in place, and what the proxy has seen
+  gpsctl profile         which profile is recorded, and which one is running
+  gpsctl set <profile>   switch and remember it
+  gpsctl try <profile>   switch until the next boot
+  gpsctl apply           put the filter in place (idempotent)
+  gpsctl revert          back to the shipped state
+  gpsctl check           status plus the rule tested against a stub upstream
+  gpsctl probe           one real query to the service, to watch it refused
+  gpsctl boot            make the phone match the recorded profile
+                         (used by the boot unit)
+
+Profiles
+  fixed       geoclue's Wi-Fi source runs through the proxy, and positions
+              derived from the IP address are thrown away
+  shipped     FuriOS exactly as it came: the Wi-Fi source switched off, which
+              leaves geoclue locating the phone by its IP address and nothing
+              filtering the result
+
+Options
+  -q, --quiet            only errors (for the boot unit)
+      --no-restart       change files, leave geoclue alone
+
+The filter is two keys in geoclue.conf and one service. Nothing else in that
+file is read or written - not the agent whitelist, not the GNSS source, and
+not which applications may ask at all.
+USAGE
+}
+
+CMD=${1:-status}
+shift 2>/dev/null || true
+for a in "$@"; do
+    case "$a" in
+        -q|--quiet)   QUIET=1 ;;
+        --no-restart) NO_RESTART=1 ;;
+    esac
+done
+
+case "$CMD" in
+    status)  cmd_status ;;
+    apply)   cmd_apply ;;
+    revert)  cmd_revert ;;
+    profile) cmd_profile ;;
+    set)     cmd_switch "${1:-}" 1 ;;
+    try)     cmd_switch "${1:-}" 0 ;;
+    boot)    cmd_boot ;;
+    check)   cmd_check ;;
+    probe)   cmd_probe ;;
+    version|-V|--version)
+        echo "gpsctl $VERSION"
+        pkgver=$(dpkg-query -W -f='${Version}' furios-gps-fix 2>/dev/null)
+        [ -n "${pkgver:-}" ] && echo "furios-gps-fix $pkgver"
+        ;;
+    help|-h|--help) usage ;;
+    *) echo "unknown command: $CMD" >&2; usage >&2; exit 2 ;;
+esac
