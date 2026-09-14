@@ -10,11 +10,23 @@ Documentation=file:/usr/share/doc/furios-gps-fix/README.md
 # still worse than answering.
 After=network.target
 Wants=network.target
+# The default limit cannot fire with a restart delay this size: five starts
+# three seconds apart need twelve seconds and the default window is ten, so a
+# port that is permanently taken - the hand-rolled predecessor coming back, say
+# - means a service that starts, fails and starts again every few seconds for
+# the life of the boot. On a phone that never suspends that is a wakeup every
+# few seconds for nothing. With a window this size the limit can actually be
+# reached, and reaching it is safe: a proxy that is not listening means geoclue
+# gets a refused connection and reports no Wi-Fi position, which is the same
+# thing it reports when the filter refuses one. gpsctl status says plainly that
+# it is not running.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 ExecStart=/usr/bin/furios-gps-proxy
 Restart=always
-RestartSec=3
+RestartSec=5
 # The counters live here, and nowhere else - it is a gauge of this boot, so it
 # belongs in /run and goes away with the boot it describes.
 RuntimeDirectory=furios-gps-proxy
@@ -45,6 +57,19 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
+# It binds one port and talks to one service. Anything else it could be made to
+# listen on is a mistake, and this makes the mistake impossible rather than
+# unlikely.
+SocketBindAllow=ipv4:tcp:8765
+SocketBindDeny=any
+# Nothing here reads another process, and nothing it writes should be readable
+# by anyone but its own user and whoever reads the counters.
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0022
+# A geolocation proxy has no business setting a timer slack, tuning the
+# scheduler or raising its own limits.
+SystemCallFilter=~@privileged @resources
 # stdout is the journal, and the only thing written there is what kind of
 # answer came back - never a position.
 StandardOutput=journal

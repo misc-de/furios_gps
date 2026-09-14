@@ -81,6 +81,55 @@ else
     done
 fi
 
+# Four properties that were each measured wrong on the device before they were
+# written down here. None can be checked by running the program: they are
+# promises the unit and the source make, and a later edit undoing one of them
+# would be silent - the proxy would still work, and the phone would just wake
+# up twice a second again, or restart for ever, or take an inherited PATH.
+printf '\n\033[1m== the promises that cost battery when broken\033[0m\n'
+check() {
+    if eval "$2"; then
+        printf '  \033[32mok\033[0m   %s\n' "$1"
+    else
+        printf '  \033[31mFAIL\033[0m %s\n' "$1"
+        FAILED=$((FAILED + 1))
+    fi
+}
+PROXY_SRC=$ROOT/tools/furios-gps-proxy
+UNIT=$ROOT/systemd/furios-gps-proxy.service
+
+# socketserver polls its own shutdown flag every poll_interval seconds, and the
+# default of 0.5 is two wakeups a second for the uptime of a phone that never
+# suspends. Measured: 60 voluntary context switches in 30 idle seconds before,
+# 0 after.
+check "the accept loop is not woken twice a second" \
+      'grep -q "serve_forever(poll_interval=IDLE_POLL)" "$PROXY_SRC" &&
+       [ "$(sed -n "s/^IDLE_POLL = //p" "$PROXY_SRC")" -ge 60 ]'
+
+# One thread per connection with nothing counting them is a local denial of
+# service from any account on the phone.
+check "handler threads have a ceiling" \
+      'grep -q "threading.active_count() > MAX_THREADS" "$PROXY_SRC"'
+
+# Five starts three seconds apart need twelve seconds; the default window is
+# ten, so the limit could never fire and a taken port meant restarting for ever.
+# Both keys belong in [Unit] - put in [Service] systemd ignores them with a
+# warning nobody reads, which is the failure this checks for.
+unit_section() { sed -n '/^\[Unit\]/,/^\[Service\]/p' "$UNIT"; }
+limit_window=$(unit_section | sed -n 's/^StartLimitIntervalSec=//p')
+limit_burst=$(unit_section | sed -n 's/^StartLimitBurst=//p')
+restart_delay=$(sed -n 's/^RestartSec=//p' "$UNIT")
+check "the restart limit can actually be reached" \
+      '[ -n "$limit_window" ] && [ -n "$limit_burst" ] && [ -n "$restart_delay" ] &&
+       [ $((limit_burst * restart_delay)) -lt "$limit_window" ]'
+
+# It runs as root from a polkit action and does everything by calling something
+# else. /usr/local must be in that PATH: leaving it out made "gpsctl check"
+# unable to find the proxy it had just started.
+check "gpsctl pins its own PATH, /usr/local included" \
+      'grep -q "^PATH=/usr/local/sbin:/usr/local/bin:" "$ROOT/gpsctl" &&
+       grep -q "^export PATH" "$ROOT/gpsctl"'
+
 # A polkit action with malformed XML is not rejected loudly - polkit ignores
 # the file, pkexec refuses, and the switch in the app looks broken for a reason
 # nothing on the screen explains.

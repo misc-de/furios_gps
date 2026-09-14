@@ -27,6 +27,19 @@ if [ "$(id -u)" -eq 0 ]; then
     done
 fi
 
+# This runs as root from a polkit action, and everything it does it does by
+# calling something else - systemctl, awk, sed, mktemp, stat, date. An
+# inherited PATH decides which of those it gets. pkexec sanitises PATH and sudo
+# usually does, but "usually" is not a property to build a root program on, and
+# the cost of not relying on it is one line.
+# Debian's own root PATH, written down rather than inherited. /usr/local
+# belongs in it - that is where a hand install puts this program and its proxy,
+# and leaving it out made "gpsctl check" unable to find the very binary it had
+# just started. Both /usr/local directories are root-owned and 0755 here, which
+# is what makes them safe to keep and an inherited PATH unsafe to trust.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 CONF=${GPSCTL_CONF:-/etc/geoclue/geoclue.conf}
 PROFILE_FILE=${GPSCTL_PROFILE:-/etc/furios-gps-fix.profile}
 # What [wifi] looked like before this project first touched it. Written once,

@@ -53,6 +53,17 @@ COUNTERS = os.environ.get("FURIOS_GPS_COUNTERS", "/run/furios-gps-proxy/counters
 # only listens on loopback - it is a refusal to allocate without a limit.
 MAX_BODY = 256 * 1024
 
+# How long the accept loop may sleep between checks of its own shutdown flag.
+# Nothing in this program calls shutdown(), so this is purely "how often does
+# the process wake up to do nothing" - an hour, rather than socketserver's
+# default of half a second.
+IDLE_POLL = 3600
+
+# Ceiling on handler threads. geoclue asks one question at a time; anything
+# approaching this is a local program misbehaving, and being refused is the
+# right answer to it.
+MAX_THREADS = 64
+
 # An answer that is not an IP fallback can still be a very wide one, and the
 # point of this program is that the width is not what it judges by. It counts
 # them anyway: if BeaconDB ever stops setting the marker, this counter moving
@@ -366,6 +377,27 @@ def main():
         allow_reuse_address = True
         daemon_threads = True
 
+        # One thread per connection, with nothing counting them, is a local
+        # denial of service: any account on the phone can open connections
+        # until the process runs out of memory, and geoclue then has no Wi-Fi
+        # source. The real client is geoclue, which asks one question at a
+        # time, so this ceiling is far above anything honest.
+        def process_request(self, request, client_address):
+            if threading.active_count() > MAX_THREADS:
+                try:
+                    request.close()
+                finally:
+                    self.handle_error(request, client_address)
+                return
+            super().process_request(request, client_address)
+
+        def handle_error(self, request, client_address):
+            # The parent prints a full traceback per failed connection. A
+            # client that goes away mid-request is ordinary and must not fill
+            # the journal, and a refused connection above is not an error at
+            # all.
+            pass
+
     try:
         srv = Server((BIND, PORT), Handler)
     except OSError as err:
@@ -375,7 +407,13 @@ def main():
 
     log(f"furios-gps-proxy {VERSION} on {BIND}:{PORT}{PATH} -> {UPSTREAM}")
     try:
-        srv.serve_forever()
+        # NOT the default 0.5. serve_forever polls a flag at that interval, so
+        # the default is two wakeups a second for the entire uptime of a phone
+        # that never suspends - measured here as 60 voluntary context switches
+        # in 30 idle seconds, for nothing. The poll only decides how quickly an
+        # in-process shutdown() would be noticed, and nothing calls that: the
+        # service is stopped with a signal, which does not wait for a poll.
+        srv.serve_forever(poll_interval=IDLE_POLL)
     except KeyboardInterrupt:
         pass
     return 0

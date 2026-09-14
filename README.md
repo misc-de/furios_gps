@@ -150,11 +150,35 @@ how the sibling audio project once built a boot deadlock that survived the
 reboot, and this does not repeat it. A filter that cannot be put in place is
 not allowed to keep the boot from finishing either.
 
+## What it costs to run
+
+Nothing measurable when nobody is asking. The proxy is one thread asleep in
+`accept()`: **zero wakeups and zero CPU ticks in 30 idle seconds**, 24 MB of
+resident python. It got there by saying so - the obvious version of this
+program wakes up twice a second for the uptime of the phone, because
+`serve_forever()` polls its own shutdown flag every half second by default and
+nothing here ever calls `shutdown()`.
+
+If it cannot start - a port that stays taken - it gives up after five tries
+instead of restarting every few seconds until the next reboot, and
+`gpsctl status` says it is not running. Giving up is safe: geoclue gets a
+refused connection and reports no Wi-Fi position, which is what it reports when
+the filter refuses one anyway. Handler threads are capped, because on loopback
+"one thread per connection" means any program on the phone could have taken the
+filter down by opening connections in a loop.
+
+[FINDINGS.md](FINDINGS.md) §6 has the numbers and the experiment behind each.
+
 ## Root, and what is granted
 
 `gpsctl` writes `/etc/geoclue/geoclue.conf` and starts a service, so applying
 and reverting need root. Everything that only reads - `status`, `profile`,
 `check`, `probe` - does not.
+
+**There is no sudoers entry and nothing here is setuid.** The only way this
+gets root without somebody typing a password is the polkit action below.
+`install.sh` calls `sudo` because a person is running it and can be asked - it
+leaves no rule behind.
 
 The polkit action lets the switch in the app do what `sudo gpsctl` does from a
 terminal, with `allow_active=yes` and no password prompt. Two reasons, the same
@@ -170,7 +194,16 @@ As root, `gpsctl` refuses every `GPSCTL_*` environment override outright. The
 tests need those overrides and therefore run unprivileged, which works because
 `apply` tests whether it can write the files rather than testing `id -u`.
 Without that refusal, a policy that hands out one command without a password
-would be handing out an arbitrary-file edit under a friendly name.
+would be handing out an arbitrary-file edit under a friendly name. For the same
+reason it pins its own `PATH` instead of inheriting one: everything it does, it
+does by calling `systemctl`, `awk`, `sed` or `mktemp`, and an inherited `PATH`
+decides which of those it gets.
+
+`geoclue.conf` is written through a temporary file in the same directory and
+renamed over the original, so a geoclue starting mid-switch reads one whole
+file or the other. It is written back `root:root` - it was found owned by the
+login user on this phone, which meant the unprivileged account could point the
+geolocation lookup anywhere it liked.
 
 ## Tests
 

@@ -151,7 +151,97 @@ position with no marker on it at all and no way to tell it apart.
 A proxy on loopback needs no patch, survives every update of everything, and
 can be taken out again by putting one URL back.
 
-## 6. Traps
+## 6. What it costs to run, and what happens when something breaks
+
+Gone over deliberately, on the device, because a filter nobody notices is the
+only kind worth having.
+
+### Idle: two wakeups a second, for nothing
+
+The proxy sits in `accept()` all day. Measured, it did not:
+
+    voluntary context switches in 30 idle seconds:  60
+    CPU ticks:                                       1
+
+Two wakeups a second, for the uptime of a phone that never suspends. The cause
+is not in this code but in what it did not say: `socketserver.serve_forever()`
+polls its own shutdown flag every `poll_interval` seconds and the default is
+0.5. Nothing here calls `shutdown()` - the service is stopped with a signal,
+which does not wait for a poll - so the interval is now an hour:
+
+    voluntary context switches in 30 idle seconds:   0
+    CPU ticks:                                       0
+
+RSS is 24 MB, which is python, and the process is one thread.
+
+### A service that restarted for ever
+
+`Restart=always` with `RestartSec=3`, and systemd's default limit of 5 starts
+in 10 seconds. Five starts three seconds apart need *twelve* seconds, so the
+limit could never be reached: a port that stays taken - the hand-rolled
+predecessor coming back, say - meant a process starting, failing and starting
+again every three seconds for the rest of the boot, which on this phone is
+until somebody reboots it.
+
+Now `RestartSec=5` with a 120-second window, so five failures actually trip the
+limit. Verified by taking the port and starting the service:
+
+    t+30s: activating  NRestarts=5
+    t+40s: failed      NRestarts=7
+    furios-gps-proxy.service: Start request repeated too quickly.
+
+Giving up is safe here, which is why it is allowed to: a proxy that is not
+listening means geoclue gets a refused connection and reports no Wi-Fi
+position - the same thing it reports when the filter refuses one. And
+`gpsctl status` says so rather than leaving it to be guessed:
+
+    FAIL  furios-gps-proxy.service is not running - every Wi-Fi lookup fails
+
+### One thread per connection, and nothing counting them
+
+`ThreadingHTTPServer` starts a thread per connection. On loopback, but loopback
+on this phone means every account and every application on it: opening
+connections in a loop was a way for anything running here to exhaust memory and
+take the location filter down with it. There is a ceiling of 64 now, which is
+64 more than the one question geoclue asks at a time.
+
+### Root, and where it comes from
+
+**No sudoers entry, anywhere.** Nothing in this project writes to
+`/etc/sudoers.d`, and nothing is setuid - checked, not assumed. The only way
+this gets root without somebody typing a password is the polkit action, which
+names one binary, allows `allow_active` alone, and is argued for in the file
+itself. `install.sh` calls `sudo` because a person is running it and can be
+asked; that is not a rule left behind afterwards.
+
+What that action can be pointed at is bounded from the other side too. `gpsctl`
+validates the profile name against a fixed list before it acts on it, refuses
+every `GPSCTL_*` override when it is root, and now pins its own `PATH` rather
+than inheriting one - it does everything by calling `systemctl`, `awk`, `sed`,
+`mktemp`, and an inherited `PATH` decides which of those it gets. pkexec
+sanitises `PATH` and sudo usually does, but "usually" is not a property to
+build a root program on.
+
+`geoclue.conf` is written through a temporary file in the same directory and
+renamed over the original, so a geoclue starting in the middle of a switch
+reads either the whole old file or the whole new one. It is written back as
+`root:root` 0644 - **it was found owned by the login user on this phone**,
+which meant the unprivileged account could point the geolocation lookup at any
+server it liked and be told it was anywhere at all.
+
+The unit itself runs under `DynamicUser` with no capabilities, a read-only
+system, no home, no devices, a system-call filter, and - added here -
+`SocketBindAllow=ipv4:tcp:8765` with everything else denied, so a proxy that is
+ever made to listen somewhere else simply cannot.
+
+### What is not defended against, and why
+
+Any local program can send a query through the proxy to BeaconDB. That is not a
+capability this adds: the same program can reach `api.beacondb.net` directly,
+over the same network, without asking anybody. A check here would cost every
+lookup something and buy nothing, so there is none.
+
+## 7. Traps
 
 **The marker, not the radius.** The obvious rule is "throw away anything wider
 than N kilometres", and it is wrong twice over: a genuine Wi-Fi fix in a
