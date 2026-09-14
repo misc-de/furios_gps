@@ -26,7 +26,7 @@
      seat has no business deciding where this phone says it is. -->
 <policyconfig>
   <vendor>misc-de</vendor>
-  <vendor_url>https://github.com/misc-de/furios_gps_fix</vendor_url>
+  <vendor_url>https://github.com/misc-de/furios_gps</vendor_url>
 
   <action id="de.misc-de.gpsctl.switch">
     <description>Switch the location filter between the shipped state and the repair</description>

@@ -1,0 +1,30 @@
+Licence notice for furios_gps
+=============================
+
+Everything in this repository that we wrote is MIT (see LICENSE): gpsctl, the
+proxy, the units, the polkit action, the installer, the tests, the packaging.
+Every one of those files carries an SPDX header saying so.
+
+There is one file here we did not write:
+
+    original-files/geoclue.conf
+
+It is geoclue's own configuration file, as the geoclue-2.0 package installs it
+on FuriOS, kept byte for byte. It is here for two reasons: the tests need a
+real file to work on rather than a fixture somebody invented, and `gpsctl
+revert` needs to know what the shipped values were. It is not modified, not
+patched, and not installed over anybody's copy - the .deb puts it under
+/usr/share/furios-gps-fix/ and never into /etc, because geoclue.conf is
+geoclue's conffile and a second package writing one is how a package upgrade
+starts asking people which version of a file they want.
+
+geoclue is GPL-2.0-or-later, Copyright the geoclue authors.
+
+Nothing here is a derived work of geoclue's code. The change this project makes
+to geoclue is to two values in its configuration file, at runtime, on the
+machine it is installed on - which is what a configuration file is for.
+
+The geolocation service the proxy talks to is BeaconDB (https://beacondb.net),
+a public instance speaking ichnaea's API. This project is not affiliated with
+it, ships no data from it, and sends it nothing that geoclue was not going to
+send it anyway.

@@ -53,8 +53,8 @@ install -Dm644 NOTICE      "$STAGE/usr/share/doc/$PKG/NOTICE"
 
 cat > "$STAGE/usr/share/doc/$PKG/copyright" <<'COPY'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: furios_gps_fix
-Source: https://github.com/misc-de/furios_gps_fix
+Upstream-Name: furios_gps
+Source: https://github.com/misc-de/furios_gps
 
 Files: *
 Copyright: 2026 misc-de
