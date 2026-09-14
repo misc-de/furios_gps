@@ -83,56 +83,55 @@ That line is the filter working. geoclue's web source reads a non-2xx as "this
 source has nothing", which is exactly what should be said about an answer that
 is really just the question echoed back.
 
-## 4. The measurement that argues against this project - and why it is not one
+## 4. The instrument, twice wrong, and what it says once it works
 
-This section first said that after the filter went in, `where-am-i` was asked
-for a position indoors and got nothing, over 75 seconds and then over five more
-minutes. It got nothing. That part is true and the conclusion drawn from it was
-still wrong, because the instrument was never measuring what it was pointed at.
+This section has been written three times and the first two were wrong. Both
+errors are worth keeping, because they are the same error.
 
-`/usr/libexec/geoclue-2.0/demos/where-am-i` prints nothing on this phone in
-**any** state. Run with the filter in place: nothing. Run with `gpsctl try
-shipped`, the state FuriOS ships, where a position is there for the asking:
-nothing, over 90 seconds. Same silence, both streams, exit 0. It is the
-`droid-sink.monitor` of this project - an instrument that returns the same
-answer whatever is in front of it, and therefore no instrument at all.
+**First attempt.** `where-am-i` was asked for a position with the filter in
+place and printed nothing, over 75 seconds and then five minutes more. Written
+down as "the phone has no position". Wrong: run it in the shipped state, where
+a position is there for the asking, and it prints nothing too. Ninety seconds,
+both streams, exit 0. An instrument that gives the same answer whatever is in
+front of it is not an instrument.
 
-What it is really hitting is one level down:
+**Second attempt.** Going one level down, `GetClient` on the GeoClue2 Manager
+was seen to hang until killed, and so was `CreateClient`, while property reads
+on the same object answered at once. Written down as "geoclue never hands out
+a client - a defect of its own". Also wrong, and this one was self-inflicted:
+a geoclue demo agent had been started by hand a few minutes earlier and then
+killed, and geoclue was blocking on authorisation from an agent that no longer
+answered. With no agent running at all, `GetClient` returns immediately, three
+times out of three.
 
-    gdbus call --system --dest org.freedesktop.GeoClue2 \
-      --object-path /org/freedesktop/GeoClue2/Manager \
-      --method org.freedesktop.GeoClue2.Manager.GetClient
+So the phone was never broken in the way two consecutive write-ups claimed.
+What `where-am-i` is really doing is still unexplained, and it does not matter:
+it is not the tool.
 
-hangs until it is killed. So does `CreateClient`. Reading properties on the
-same object answers immediately:
+**What works** is asking geoclue over its own interface on *one held
+connection*. That is the part `gdbus` cannot do - each call is its own
+connection, geoclue ties the client object to the connection that created it,
+and the object is gone before the next call arrives:
 
-    ({'InUse': <false>, 'AvailableAccuracyLevel': <uint32 8>},)
+    Error: org.freedesktop.DBus.Error.UnknownMethod:
+    Object does not exist at path "/org/freedesktop/GeoClue2/Client/5"
 
-So geoclue is up, talking, and reporting that an Exact-accuracy source is
-available - and never hands out a client to ask with. No geoclue agent is
-registered either; the `[agent]` whitelist names four and none of them is
-running. Starting the demo agent by hand changed nothing.
+Held open from one process (`tools/ask-geoclue.py`, Gio), it behaves:
+`GetClient`, set `DesktopId`, set `RequestedAccuracyLevel` to 8, `Start`,
+and wait for `LocationUpdated`.
 
-**None of that is caused by this project.** It is identical in the shipped
-state, which is what made it findable at all. It is a defect of its own, on
-this phone, and it is not this repository's to fix.
+**The measurement, at last.** Indoors, no sky view, filter in place, accuracy
+level Exact requested: `Start: ok`, and **no position in 75 seconds**. That is
+a real result from a client that really started.
 
-What remains measured, and is not in doubt:
-
-- BeaconDB has no coverage at this location (§3), so the Wi-Fi source was
-  contributing an IP position and nothing else;
-- the proxy refuses those, and geoclue's own log shows its web source
-  accepting the refusal as "this source has nothing".
-
-What follows from that is an argument rather than a measurement, and is written
-as one: where BeaconDB does not know the neighbourhood, the phone has no
-network position and must wait for GNSS. **Whether GNSS then delivers on this
-phone has not been shown here**, and until it is, the honest claim for this
-project is the narrow one - that a position which is really just the question
-echoed back is not published as if it were an observation.
-
-The instrument for the wider claim still has to be found. `where-am-i` is not
-it.
+It is not yet a *proof* about this project, because the instrument has not been
+shown to report a position when there is one - and that is exactly the check
+the first attempt skipped. The honest way to close it costs nothing: outdoors,
+in this same state, GNSS should produce a fix and the same script should report
+it. Until then the claim stands at this: with the filter in place, and
+BeaconDB having no coverage here (§3), the phone gets no position indoors -
+which is what the phone's owner is asking for, since the only position on offer
+was the carrier's exit node.
 
 ## 5. Why the answer is filtered and not the question
 
@@ -191,6 +190,13 @@ position certainly is available. Every conclusion drawn from its silence was
 worthless. The check that catches this is the cheap one: point the instrument
 at the state where the answer is known before trusting it on the state where it
 is not.
+
+**Debugging tools that change what they are measuring.** Starting geoclue's
+demo agent by hand and then killing it leaves geoclue blocking on authorisation
+from an agent that is gone, which looks exactly like "geoclue never hands out a
+client" - and got written down as a defect of the phone. It was a defect of the
+investigation. A tool started to observe a system is part of the system until
+it is properly gone.
 
 **An idempotent command that restarts something is not idempotent.** `apply`
 ended with an unconditional `systemctl try-restart` of the proxy, for a good

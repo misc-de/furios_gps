@@ -111,12 +111,15 @@ for GNSS. Measured here on 14 September 2026, indoors, with fifty networks in
 range: BeaconDB knew none of them and answered every query with an IP position
 of 25 km radius. Twenty-five of those were refused in one hour.
 
-How long that wait is has **not** been measured, and this README will not
-pretend otherwise: the obvious tool for it, geoclue's own `where-am-i` demo,
-returns nothing on this phone in every state including the shipped one, because
-geoclue here never hands out a client to ask with. That is a defect of its own
-and not one this project caused or fixes - [FINDINGS.md](FINDINGS.md) §4 has
-the detail.
+How long that wait is has **not** been settled. Asked over geoclue's own
+interface, indoors and with the filter in place, the phone reported no position
+in 75 seconds - a real answer from a client that really started, but not yet a
+proof, because the same instrument has still to be shown reporting a position
+when there is one. Outdoors, where GNSS can fix, will close that. Two earlier
+attempts at this measurement were wrong in instructive ways and
+[FINDINGS.md](FINDINGS.md) §4 keeps both, along with the script that does work
+- geoclue ties a client to the connection that created it, so anything built
+out of separate `gdbus` calls measures nothing.
 
 That is why `gpsctl status` checks `[hybris] enable = true` and says why, and
 why it is the one key outside `[wifi]` the tool looks at. With the Wi-Fi answer
@@ -188,7 +191,8 @@ What cannot: whether the phone ends up in the right place on a map. That is
 ## Layout
 
     gpsctl                 the tool
-    tools/                 the proxy
+    tools/                 the proxy, and the script that asks geoclue for a
+                           position over one held connection
     original-files/        geoclue.conf as FuriOS ships it, for the tests
     systemd/               the proxy service and the boot unit
     polkit/                the action behind the switch in the app
