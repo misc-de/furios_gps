@@ -106,11 +106,17 @@ instead of a fast false one.**
 
 Where BeaconDB knows the Wi-Fi networks around you, nothing is lost - real
 fixes pass through untouched and arrive as fast as they ever did. Where it does
-not, the Wi-Fi source now contributes nothing at all, and the phone has no
-position until GNSS gets one. Measured here on 14 September 2026, indoors, with
-fifty networks in range: BeaconDB knew none of them and answered every query
-with an IP position of 25 km radius. Twenty-five of those were refused in one
-hour.
+not, the Wi-Fi source now contributes nothing at all, and the phone has to wait
+for GNSS. Measured here on 14 September 2026, indoors, with fifty networks in
+range: BeaconDB knew none of them and answered every query with an IP position
+of 25 km radius. Twenty-five of those were refused in one hour.
+
+How long that wait is has **not** been measured, and this README will not
+pretend otherwise: the obvious tool for it, geoclue's own `where-am-i` demo,
+returns nothing on this phone in every state including the shipped one, because
+geoclue here never hands out a client to ask with. That is a defect of its own
+and not one this project caused or fixes - [FINDINGS.md](FINDINGS.md) §4 has
+the detail.
 
 That is why `gpsctl status` checks `[hybris] enable = true` and says why, and
 why it is the one key outside `[wifi]` the tool looks at. With the Wi-Fi answer

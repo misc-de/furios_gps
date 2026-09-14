@@ -83,27 +83,56 @@ That line is the filter working. geoclue's web source reads a non-2xx as "this
 source has nothing", which is exactly what should be said about an answer that
 is really just the question echoed back.
 
-## 4. The measurement that argues against this project
+## 4. The measurement that argues against this project - and why it is not one
 
-After the filter went in, `where-am-i` was asked for a position indoors and got
-**nothing at all** - first over 75 seconds, then over a further five minutes.
-No Wi-Fi position, because it is refused, and no GNSS fix, because there is no
-sky view.
+This section first said that after the filter went in, `where-am-i` was asked
+for a position indoors and got nothing, over 75 seconds and then over five more
+minutes. It got nothing. That part is true and the conclusion drawn from it was
+still wrong, because the instrument was never measuring what it was pointed at.
 
-That is the cost, and it is not small. Before the filter the same phone in the
-same room would have answered immediately, with a point 25 km away. The claim
-this project makes is only that no answer is better than a confidently wrong
-one - that an application which knows it has no position can say so, ask again,
-or wait, whereas an application handed a wrong position simply acts on it.
+`/usr/libexec/geoclue-2.0/demos/where-am-i` prints nothing on this phone in
+**any** state. Run with the filter in place: nothing. Run with `gpsctl try
+shipped`, the state FuriOS ships, where a position is there for the asking:
+nothing, over 90 seconds. Same silence, both streams, exit 0. It is the
+`droid-sink.monitor` of this project - an instrument that returns the same
+answer whatever is in front of it, and therefore no instrument at all.
 
-It is a claim about which failure is more useful, not a claim that nothing was
-lost. On a phone whose neighbourhood BeaconDB *does* know, nothing is lost at
-all: real fixes carry no marker and pass through untouched.
+What it is really hitting is one level down:
 
-This is why `gpsctl status` reports `[hybris] enable` even though this project
-never writes that key. With the Wi-Fi answer filtered and GNSS switched off,
-there would be no position of any kind, and that is a state somebody should be
-told about rather than discover.
+    gdbus call --system --dest org.freedesktop.GeoClue2 \
+      --object-path /org/freedesktop/GeoClue2/Manager \
+      --method org.freedesktop.GeoClue2.Manager.GetClient
+
+hangs until it is killed. So does `CreateClient`. Reading properties on the
+same object answers immediately:
+
+    ({'InUse': <false>, 'AvailableAccuracyLevel': <uint32 8>},)
+
+So geoclue is up, talking, and reporting that an Exact-accuracy source is
+available - and never hands out a client to ask with. No geoclue agent is
+registered either; the `[agent]` whitelist names four and none of them is
+running. Starting the demo agent by hand changed nothing.
+
+**None of that is caused by this project.** It is identical in the shipped
+state, which is what made it findable at all. It is a defect of its own, on
+this phone, and it is not this repository's to fix.
+
+What remains measured, and is not in doubt:
+
+- BeaconDB has no coverage at this location (§3), so the Wi-Fi source was
+  contributing an IP position and nothing else;
+- the proxy refuses those, and geoclue's own log shows its web source
+  accepting the refusal as "this source has nothing".
+
+What follows from that is an argument rather than a measurement, and is written
+as one: where BeaconDB does not know the neighbourhood, the phone has no
+network position and must wait for GNSS. **Whether GNSS then delivers on this
+phone has not been shown here**, and until it is, the honest claim for this
+project is the narrow one - that a position which is really just the question
+echoed back is not published as if it were an observation.
+
+The instrument for the wider claim still has to be found. `where-am-i` is not
+it.
 
 ## 5. Why the answer is filtered and not the question
 
@@ -154,6 +183,14 @@ deadlock, and the sibling audio project built exactly that one and spent a
 morning on it. `gpsctl boot` runs with `--no-restart` for that reason, and the
 unit is `SuccessExitStatus=0 1` so a filter that cannot be applied cannot keep
 the boot from finishing.
+
+**An instrument that says the same thing whatever happens.** `where-am-i` was
+used to check whether the phone still had a position after the filter went in.
+It printed nothing - and it prints nothing in the shipped state too, where a
+position certainly is available. Every conclusion drawn from its silence was
+worthless. The check that catches this is the cheap one: point the instrument
+at the state where the answer is known before trusting it on the state where it
+is not.
 
 **An idempotent command that restarts something is not idempotent.** `apply`
 ended with an unconditional `systemctl try-restart` of the proxy, for a good
