@@ -155,6 +155,19 @@ morning on it. `gpsctl boot` runs with `--no-restart` for that reason, and the
 unit is `SuccessExitStatus=0 1` so a filter that cannot be applied cannot keep
 the boot from finishing.
 
+**An idempotent command that restarts something is not idempotent.** `apply`
+ended with an unconditional `systemctl try-restart` of the proxy, for a good
+reason - a package upgrade installs new code and leaves the old process
+running. But `gpsctl boot` calls `apply`, so that restart happened at every
+boot: the proxy was started by its own unit, and then stopped and started again
+by the boot unit a moment later, in the window before geoclue's first lookup -
+which is precisely the window the proxy's unit file is written to keep it out
+of. It also threw away the counters each time, and a re-run of the installer
+did the same. Measured: two `apply` runs in a row, and the counters from the
+first were gone. Now the restart asks whether the program on disk is newer than
+the process serving from it, and anything it cannot read is treated as a reason
+to restart rather than a reason to skip one.
+
 **geoclue is D-Bus activated.** Most of the time there is no geoclue running to
 restart at all; it starts when something asks and exits when nothing is asking.
 `try-restart` is the honest verb - restart it if it is up, otherwise leave it

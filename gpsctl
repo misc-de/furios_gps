@@ -257,6 +257,38 @@ kick_geoclue() {
     fi
 }
 
+# An upgrade installs new code and leaves the old process running, so apply has
+# to restart it - but only then. apply is idempotent and is run at every boot by
+# the boot unit, and an unconditional restart there closes the port for a moment
+# at exactly the time geoclue is starting and making its first lookup, as well
+# as throwing away counters that describe the boot. So ask first whether the
+# program on disk is actually newer than the process serving from it.
+restart_if_stale() {
+    local bin started t_bin t_start
+    bin=$(systemctl show "$UNIT" -p ExecStart --value 2>/dev/null \
+          | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1)
+    started=$(systemctl show "$UNIT" -p ActiveEnterTimestamp --value 2>/dev/null)
+    # Anything we cannot read is a reason to do what the old code did, not a
+    # reason to skip a restart an upgrade needs.
+    if [ -z "$bin" ] || [ ! -f "$bin" ] || [ -z "$started" ]; then
+        systemctl try-restart "$UNIT" >/dev/null 2>&1 || true
+        return 0
+    fi
+    t_bin=$(stat -c %Y "$bin" 2>/dev/null) || t_bin=
+    t_start=$(date -d "$started" +%s 2>/dev/null) || t_start=
+    if [ -z "$t_bin" ] || [ -z "$t_start" ]; then
+        systemctl try-restart "$UNIT" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if [ "$t_bin" -gt "$t_start" ]; then
+        systemctl try-restart "$UNIT" >/dev/null 2>&1 \
+            && ok "$UNIT restarted - the program on disk is newer than the one running" \
+            || warn "$UNIT holds older code and could not be restarted"
+    else
+        skip "$UNIT is already running the program on disk"
+    fi
+}
+
 # --- apply / revert ---------------------------------------------------------
 
 cmd_apply() {
@@ -301,8 +333,7 @@ cmd_apply() {
                     bad "could not start $UNIT - see: systemctl status $UNIT"; failed=1
                 fi ;;
         esac
-        # An upgrade installs new code and leaves the old process running.
-        systemctl try-restart "$UNIT" >/dev/null 2>&1 || true
+        restart_if_stale
     fi
 
     head_ "geoclue re-reads its config"
