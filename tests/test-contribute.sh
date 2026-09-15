@@ -53,7 +53,7 @@ cases = [
     ("Cafe_nomap",        True,  "_nomap"),
     ("Cafe_NOMAP",        True,  "_nomap, upper case"),
     ("Cafe_optout",       True,  "_optout"),
-    ("iPhone von Anna",   True,  "a phone hotspot"),
+    ("iPhone of Anna",    True,  "a phone hotspot"),
     ("Android AP 42",     True,  "a phone hotspot"),
     ("Stadtbuecherei",    False, "an ordinary network"),
     ("nomap_cafe",        False, "_nomap only counts at the end"),
