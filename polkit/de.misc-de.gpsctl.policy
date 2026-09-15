@@ -3,6 +3,9 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
 
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+     SPDX-License-Identifier: MIT -->
+
 <!-- Lets the switch in the app do what "sudo gpsctl" does from a terminal.
 
      allow_active is "yes", so the person at the phone is not asked for a

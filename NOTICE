@@ -24,6 +24,12 @@ Nothing here is a derived work of geoclue's code. The change this project makes
 to geoclue is to two values in its configuration file, at runtime, on the
 machine it is installed on - which is what a configuration file is for.
 
+The proxy itself uses nothing but the Python standard library. One tool
+beside it, tools/ask-geoclue.py, uses GLib and Gio (LGPL-2.1+) through
+PyGObject (LGPL-2.1+) - it has to, because geoclue ties a client to the D-Bus
+connection that asked for it, so single gdbus calls measure nothing. It is a
+diagnostic tool, not part of what gets installed.
+
 The geolocation service the proxy talks to is BeaconDB (https://beacondb.net),
 a public instance speaking ichnaea's API. This project is not affiliated with
 it, ships no data from it, and sends it nothing that geoclue was not going to
