@@ -137,6 +137,37 @@ check "status says whether anything is actually running" "yes" \
 check "a missing unit is not fatal" "0" \
     "$(CONTRIB_STATE="$TMP/state2" "$TOOL" on >/dev/null 2>&1; echo $?)"
 
+# --- power ------------------------------------------------------------------
+
+# The question that found this: does it cost anything when it is switched off,
+# and does it cost more than it needs to when it is on? Off it costs nothing -
+# the service exits at once. On, the expensive thing is the GNSS receiver, and
+# everything that can rule a measurement out has to be asked before it is
+# switched on.
+printf '\n\033[1m  what it costs while running\033[0m\n'
+check "the cheap checks come before the receiver" "yes" \
+    "$(awk '/def measure/,/pos = gnss_fix/' "$TOOL" | grep -q 'gleiche_umgebung' && echo yes || echo no)"
+check "standing still never switches it on" "yes" \
+    "$(grep -q 'not switching the receiver on' "$TOOL" && echo yes || echo no)"
+check "and indoors it stops trying every few minutes" "yes" \
+    "$(grep -q 'gnss_misses' "$TOOL" && grep -q 'gnss_next_try' "$TOOL" && echo yes || echo no)"
+py <<'PYEOF'
+import importlib.machinery, importlib.util, os, sys, tempfile, time
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+aps = [{"macAddress": f"AA:BB:CC:DD:EE:{i:02X}"} for i in range(6)]
+m.save_stats({"last_position": [50.0, 8.0, time.time()],
+              "last_aps": [a["macAddress"] for a in aps]})
+gerufen = {"n": 0}
+m.gnss_fix = lambda *a, **k: gerufen.update(n=gerufen["n"] + 1) or None
+m.scan_wifi = lambda: aps
+m.measure()
+sys.exit(0 if gerufen["n"] == 0 else 1)
+PYEOF
+check "proved: same place, receiver untouched" "0" "$?"
+
 # --- the unit ---------------------------------------------------------------
 
 check "there is a user unit, not a system one" "yes" \

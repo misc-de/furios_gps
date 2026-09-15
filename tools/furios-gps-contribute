@@ -168,7 +168,7 @@ def scan_wifi():
 
 # ---------------------------------------------------------------- position
 
-def gnss_fix(wait_s=90):
+def gnss_fix(wait_s=45):
     """One position from geoclue, but only if it is a GNSS one.
 
     Returns None rather than a doubtful fix. Sending a Wi-Fi-derived position
@@ -365,19 +365,78 @@ def flush(alles=False):
 
 # ---------------------------------------------------------------- measure
 
+def gleiche_umgebung(aps, s):
+    """Do these access points look like the ones from last time?
+
+    A cheap stand-in for "has this phone moved". It exists because the honest
+    test - compare the positions - needs a GNSS fix first, and a GNSS fix is
+    the expensive thing here: the receiver is switched on for up to a minute
+    and draws tens of milliamps while it looks. Doing that on a phone lying on
+    a table, every few minutes, only to throw the result away because it is
+    two metres from the last one, is the kind of cost nobody notices until the
+    battery is flat.
+
+    The networks in range are already scanned by NetworkManager and cost
+    nothing extra. When they are the same set, the phone is in the same place.
+    """
+    vorher = set(s.get("last_aps") or [])
+    if not vorher:
+        return False
+    jetzt = {a["macAddress"] for a in aps}
+    # Overlap rather than equality, so that a neighbour switching their router
+    # off does not read as a move. It stays deliberately strict: at 0.8 a set
+    # of six survives one network disappearing, but not one disappearing and
+    # another appearing, which is already as likely to be a few steps as a
+    # flickering signal. Measuring once too often costs a little power;
+    # missing a move costs an observation, which is the point of all this.
+    gemeinsam = len(jetzt & vorher) / max(1, len(jetzt | vorher))
+    return gemeinsam >= 0.8
+
+
 def measure(dry=False):
-    """One observation, or a reason why there is none."""
+    """One observation, or a reason why there is none.
+
+    The order is deliberate and is about power: everything that can rule a
+    measurement out is asked before the GNSS receiver is switched on.
+    """
     aps = scan_wifi()
     if len(aps) < MIN_APS:
         log(f"skipped: {len(aps)} usable access points, need {MIN_APS}")
         return None
 
-    pos = gnss_fix()
-    if pos is None:
-        return None
-
     s = load_stats()
     letzte = s.get("last_position")
+    # Cheap first: same networks and not long ago means the same place, and
+    # there is nothing here a GNSS fix could add.
+    if letzte and not dry:
+        alter = time.time() - letzte[2]
+        if alter < MIN_AGE_S and gleiche_umgebung(aps, s):
+            log(f"skipped: same networks as {alter/60:.0f} min ago - "
+                "not switching the receiver on")
+            return None
+
+    # Indoors there is never a fix, and looking for one every few minutes is
+    # the worst case for the battery: the receiver runs and finds nothing. So
+    # a run of failures stretches the wait between attempts.
+    fehl = s.get("gnss_misses", 0)
+    if fehl and not dry:
+        naechster = s.get("gnss_next_try", 0)
+        if time.time() < naechster:
+            log(f"skipped: {fehl} fixes in a row came to nothing, "
+                f"waiting {int((naechster - time.time())/60)} min")
+            return None
+
+    pos = gnss_fix()
+    if pos is None:
+        s["gnss_misses"] = fehl + 1
+        # 3, 6, 12 ... up to an hour between attempts.
+        wartezeit = min(3600, INTERVAL_S * (2 ** min(fehl, 5)))
+        s["gnss_next_try"] = time.time() + wartezeit
+        save_stats(s)
+        return None
+    s["gnss_misses"] = 0
+    s.pop("gnss_next_try", None)
+
     if letzte:
         weg = entfernung_m((letzte[0], letzte[1]), (pos["latitude"], pos["longitude"]))
         alter = time.time() - letzte[2]
@@ -393,6 +452,7 @@ def measure(dry=False):
 
     queue_append(item)
     s["last_position"] = [pos["latitude"], pos["longitude"], time.time()]
+    s["last_aps"] = [a["macAddress"] for a in aps]
     s["collected"] = s.get("collected", 0) + 1
     save_stats(s)
     log(f"queued: {len(aps)} access points, accuracy {pos['accuracy']:.0f} m")
