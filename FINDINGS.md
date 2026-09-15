@@ -314,3 +314,149 @@ variable would let any active session rewrite any file on the phone. So as root
 it refuses every `GPSCTL_*` override outright, and the tests run unprivileged
 instead - which they can, because `apply` asks whether it can write the file
 rather than asking whether it is root.
+
+## From the README
+
+The README was cut down to what somebody needs to use this. What follows was in it until then: the reasoning, the measurements and the trade-offs behind the decisions.
+
+## What the filter does
+
+`furios-gps-proxy` listens on `127.0.0.1:8765`, forwards the query to BeaconDB
+unchanged, looks at the answer, and turns the marked ones into an HTTP 404.
+geoclue's web source reads a non-2xx as "this source has nothing", which is the
+truth of the matter, and the GNSS fix from the hybris source is left as the
+only thing anybody is told. In geoclue's log the filter working looks like
+this, and it is not an error:
+
+    geoclue[47897]: Failed to query location: Query location SOUP error: Not Found
+
+What it judges by is the marker and nothing else. A genuine Wi-Fi fix passes
+through however wide it is, a cell-area fallback (`lacf`) is not an IP fallback
+and passes, "nothing found" stays nothing found. Answers wider than 40 km that
+carry no marker are counted separately: if that counter rises while `rejected`
+stays at zero, BeaconDB has stopped setting the marker and this project needs
+looking at. That is the early-warning post.
+
+Nothing is cached, nothing is stored, and nothing is written down about *where*
+anybody is. The counters in `/run/furios-gps-proxy/counters` say how many
+answers were of which kind, they go away with the boot they describe, and they
+are the whole of what the program remembers between two requests. The service
+runs under `DynamicUser=yes` with no account of its own and answers only on
+loopback.
+
+## What it costs
+
+This is a trade, and the honest version of it is: **a slow true position
+instead of a fast false one.**
+
+Where BeaconDB knows the Wi-Fi networks around you, nothing is lost - real
+fixes pass through untouched and arrive as fast as they ever did. Where it does
+not, the Wi-Fi source now contributes nothing at all, and the phone has to wait
+for GNSS. Measured here on 14 September 2026, indoors, with fifty networks in
+range: BeaconDB knew none of them and answered every query with an IP position
+of 25 km radius. Twenty-five of those were refused in one hour.
+
+How long that wait is has **not** been settled. Asked over geoclue's own
+interface, indoors and with the filter in place, the phone reported no position
+in 75 seconds - a real answer from a client that really started, but not yet a
+proof, because the same instrument has still to be shown reporting a position
+when there is one. Outdoors, where GNSS can fix, will close that. Two earlier
+attempts at this measurement were wrong in instructive ways and
+[FINDINGS.md](FINDINGS.md) §4 keeps both, along with the script that does work
+- geoclue ties a client to the connection that created it, so anything built
+out of separate `gdbus` calls measures nothing.
+
+That is why `gpsctl status` checks `[hybris] enable = true` and says why, and
+why it is the one key outside `[wifi]` the tool looks at. With the Wi-Fi answer
+filtered and GNSS off as well, there would be no position of any kind. This
+project will not change that key for you - it is not ours - but it will not let
+you overlook it either.
+
+## Minimally invasive
+
+The whole change is **two keys in one section** of `geoclue.conf` plus one
+service. The agent whitelist, the GNSS source, the submission settings and
+which applications may ask at all belong to somebody else and are never read or
+written, not on apply and not on revert.
+
+What `[wifi]` looked like before this project first touched it is written to
+`/etc/furios-gps-fix.shipped` on the first apply, and that is what revert puts
+back - so a phone somebody had already configured by hand gets its own values
+returned to it, not ours. The one exception is deliberate: our own proxy URL is
+never recorded as the state to go back to, or revert would be a no-op for ever
+after on any phone that already had the hand-rolled ancestor of this package
+running.
+
+The boot unit is ordered `Before=geoclue.service`, because geoclue reads its
+config once, at start, and a config written afterwards means the first lookup
+of the boot still goes wherever the old file said. It runs `gpsctl boot` with
+`--no-restart`: restarting a service from inside a unit ordered against it is
+how the sibling audio project once built a boot deadlock that survived the
+reboot, and this does not repeat it. A filter that cannot be put in place is
+not allowed to keep the boot from finishing either.
+
+## What it costs to run
+
+Nothing measurable when nobody is asking. The proxy is one thread asleep in
+`accept()`: **zero wakeups and zero CPU ticks in 30 idle seconds**, 24 MB of
+resident python. It got there by saying so - the obvious version of this
+program wakes up twice a second for the uptime of the phone, because
+`serve_forever()` polls its own shutdown flag every half second by default and
+nothing here ever calls `shutdown()`.
+
+If it cannot start - a port that stays taken - it gives up after five tries
+instead of restarting every few seconds until the next reboot, and
+`gpsctl status` says it is not running. Giving up is safe: geoclue gets a
+refused connection and reports no Wi-Fi position, which is what it reports when
+the filter refuses one anyway. Handler threads are capped, because on loopback
+"one thread per connection" means any program on the phone could have taken the
+filter down by opening connections in a loop.
+
+[FINDINGS.md](FINDINGS.md) §6 has the numbers and the experiment behind each.
+
+## Root, and what is granted
+
+`gpsctl` writes `/etc/geoclue/geoclue.conf` and starts a service, so applying
+and reverting need root. Everything that only reads - `status`, `profile`,
+`check`, `probe` - does not.
+
+**There is no sudoers entry and nothing here is setuid.** The only way this
+gets root without somebody typing a password is the polkit action below.
+`install.sh` calls `sudo` because a person is running it and can be asked - it
+leaves no rule behind.
+
+The polkit action lets the switch in the app do what `sudo gpsctl` does from a
+terminal, with `allow_active=yes` and no password prompt. Two reasons, the same
+two as the modem switch in the sibling project. There is nobody to ask: phosh
+registers no polkit authentication agent, so an action set to `auth_admin` has
+no way to put a prompt on the screen and the switch would be a control that
+does nothing. And the grant is small: two keys in one file and one service, on
+a phone where that file was owned by the login user to begin with. Not
+`allow_any` and not `allow_inactive` - a remote session has no business
+deciding where this phone says it is.
+
+As root, `gpsctl` refuses every `GPSCTL_*` environment override outright. The
+tests need those overrides and therefore run unprivileged, which works because
+`apply` tests whether it can write the files rather than testing `id -u`.
+Without that refusal, a policy that hands out one command without a password
+would be handing out an arbitrary-file edit under a friendly name. For the same
+reason it pins its own `PATH` instead of inheriting one: everything it does, it
+does by calling `systemctl`, `awk`, `sed` or `mktemp`, and an inherited `PATH`
+decides which of those it gets.
+
+`geoclue.conf` is written through a temporary file in the same directory and
+renamed over the original, so a geoclue starting mid-switch reads one whole
+file or the other. It is written back `root:root` - it was found owned by the
+login user on this phone, which meant the unprivileged account could point the
+geolocation lookup anywhere it liked.
+
+## Layout
+
+    gpsctl                 the tool
+    tools/                 the proxy, and the script that asks geoclue for a
+                           position over one held connection
+    original-files/        geoclue.conf as FuriOS ships it, for the tests
+    systemd/               the proxy service and the boot unit
+    polkit/                the action behind the switch in the app
+    tests/                 what can be checked without a network
+    packaging/             build-deb.sh
