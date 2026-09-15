@@ -26,6 +26,14 @@ fi
 echo "1) programs"
 sudo install -Dm755 gpsctl                 "$BIN/gpsctl"
 sudo install -Dm755 tools/furios-gps-proxy "$BIN/furios-gps-proxy"
+# Contributing back to beaconDB. Installed but never switched on: the tool
+# does nothing without a marker the user has to place, so this only puts the
+# option within reach.
+sudo install -Dm755 tools/furios-gps-contribute "$BIN/furios-gps-contribute"
+install -Dm644 systemd/furios-gps-contribute.service \
+    "$HOME/.config/systemd/user/furios-gps-contribute.service"
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user enable --now furios-gps-contribute.service >/dev/null 2>&1 || true
 
 echo "2) units"
 # The units ship with the package's paths in them; point them at these.

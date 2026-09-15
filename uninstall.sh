@@ -12,6 +12,9 @@ sudo /usr/local/bin/gpsctl revert || true
 
 sudo systemctl disable --now furios-gps-proxy.service 2>/dev/null || true
 sudo systemctl disable --now furios-gps-fix.service 2>/dev/null || true
+systemctl --user disable --now furios-gps-contribute.service >/dev/null 2>&1 || true
+rm -f "$HOME/.config/systemd/user/furios-gps-contribute.service"
+sudo rm -f /usr/local/bin/furios-gps-contribute /usr/bin/furios-gps-contribute
 sudo rm -f /etc/systemd/system/furios-gps-proxy.service \
            /etc/systemd/system/furios-gps-fix.service \
            /usr/local/bin/gpsctl \

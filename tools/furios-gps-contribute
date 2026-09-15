@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+"""Contributes Wi-Fi observations to beaconDB - carefully, or not at all.
+
+This is the other half of what this repository does. The proxy refuses
+positions beaconDB derived from an IP address; this hands beaconDB the
+observations that would let it answer properly next time, for this area.
+
+It is off unless somebody turns it on. Everything below exists to make sure
+that what is sent is worth having and that the server is left alone as much as
+possible - a contributor that floods a volunteer-run service with noise is
+worse than no contributor.
+
+The rules, and where they come from
+-----------------------------------
+beaconDB states them at https://beacondb.net and refers to ichnaea's API:
+
+  * submissions go to https://api.beacondb.net/v2/geosubmit as
+    {"items": [{timestamp, position, wifiAccessPoints}]}
+  * "Hidden Wifi networks must not be collected."
+  * "Wifi networks with a SSID ending in _nomap must not be collected."
+    beaconDB honours _optout as well, so both are dropped here.
+  * clients must identify themselves with a user agent.
+
+Nothing states a rate limit. That is not permission to hammer it: the
+intervals below are deliberately slow, submissions are batched, and a failure
+backs off rather than retries.
+
+What counts as a measurement worth sending
+------------------------------------------
+The position has to come from GNSS. This matters more than anything else
+here: geoclue can answer from a Wi-Fi lookup, and a Wi-Fi lookup is answered
+by beaconDB itself. Submitting one of those would feed the database its own
+estimate back as though it were an observation - a feedback loop that makes
+the data worse and looks, from the server's side, exactly like poisoning.
+
+Two things separate a GNSS fix from a network-derived one, and both are
+required here:
+
+  * an altitude. Wi-Fi and IP lookups return none; GNSS does.
+  * an accuracy at or below ACCURACY_MAX metres. A GNSS fix on this device
+    is a handful of metres; a Wi-Fi answer is tens to hundreds.
+
+The altitude is the stronger of the two, because it is a fact about the fix
+rather than a threshold somebody picked.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+import gi
+from gi.repository import Gio, GLib  # noqa: E402
+
+VERSION = "0.1.0"
+ENDPOINT = os.environ.get("CONTRIB_ENDPOINT",
+                          "https://api.beacondb.net/v2/geosubmit")
+# beaconDB asks clients to identify themselves. A contact address belongs in
+# here so that somebody with a complaint has somewhere to send it.
+USER_AGENT = f"furios_gps/{VERSION} (+https://github.com/misc-de/furios_gps)"
+
+STATE_DIR = os.environ.get(
+    "CONTRIB_STATE",
+    os.path.join(os.environ.get("XDG_CONFIG_HOME",
+                                os.path.expanduser("~/.config")), "furios-gps"))
+MARKER = os.path.join(STATE_DIR, "contribute")     # exists = switched on
+QUEUE = os.path.join(STATE_DIR, "queue.jsonl")
+STATS = os.path.join(STATE_DIR, "contribute-stats.json")
+
+# Deliberately unhurried. A phone in a pocket does not need to be measured
+# more often than this, and a measurement every few minutes still maps a walk.
+INTERVAL_S = int(os.environ.get("CONTRIB_INTERVAL", "180"))
+ACCURACY_MAX = float(os.environ.get("CONTRIB_ACCURACY", "25"))
+# Two observations of the same spot teach the database nothing the first did
+# not, so a new one has to be a real distance away or a long time later.
+MIN_MOVE_M = float(os.environ.get("CONTRIB_MIN_MOVE", "40"))
+MIN_AGE_S = int(os.environ.get("CONTRIB_MIN_AGE", "900"))
+# One request per batch, and never more than a handful of batches an hour.
+BATCH = int(os.environ.get("CONTRIB_BATCH", "12"))
+QUEUE_MAX = int(os.environ.get("CONTRIB_QUEUE_MAX", "500"))
+# ichnaea wants at least two access points in a wifi-only report.
+MIN_APS = 2
+# Backoff after a refused or failed submission, in seconds. It gives up for
+# this run rather than walking the list again - the queue keeps.
+BACKOFF_S = [60, 300, 1800]
+
+NOMAP = re.compile(r"(_nomap|_optout)$", re.IGNORECASE)
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def load_stats():
+    try:
+        with open(STATS) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_stats(s):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATS + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(s, fh)
+    os.replace(tmp, STATS)
+
+
+# ---------------------------------------------------------------- wifi
+
+def scan_wifi():
+    """Access points in range, as beaconDB may receive them.
+
+    nmcli, because it needs no root and NetworkManager is scanning anyway -
+    a scan of our own would cost power and interrupt the connection.
+    """
+    try:
+        out = subprocess.run(
+            ["nmcli", "-t", "-f", "BSSID,SSID,FREQ,SIGNAL", "device", "wifi", "list"],
+            capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    aps, gesehen = [], set()
+    for zeile in out.splitlines():
+        # nmcli escapes the colons inside a BSSID as "\:" - unescaping first
+        # and splitting after would tear the MAC apart.
+        felder = re.split(r"(?<!\\):", zeile)
+        if len(felder) < 4:
+            continue
+        mac = felder[0].replace("\\:", ":").strip().upper()
+        ssid = felder[1].replace("\\:", ":")
+        if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac):
+            continue
+
+        # Hidden networks must not be collected - nmcli reports them with an
+        # empty SSID. Neither must anything that opted out.
+        if not ssid.strip() or NOMAP.search(ssid.strip()):
+            continue
+        # A router that moves takes its observations with it and poisons the
+        # area it left. These names are what phones call their hotspots.
+        if re.search(r"(iphone|android.?ap|mobile.?hotspot|galaxy.*hotspot)",
+                     ssid, re.IGNORECASE):
+            continue
+        if mac in gesehen:
+            continue
+        gesehen.add(mac)
+
+        ap = {"macAddress": mac}
+        try:
+            ap["frequency"] = int(felder[2].split()[0])
+        except (ValueError, IndexError):
+            pass
+        try:
+            # nmcli reports 0-100; ichnaea wants dBm. The usual mapping.
+            ap["signalStrength"] = int(round(int(felder[3]) / 2.0 - 100))
+        except (ValueError, IndexError):
+            pass
+        aps.append(ap)
+    return aps
+
+
+# ---------------------------------------------------------------- position
+
+def gnss_fix(wait_s=90):
+    """One position from geoclue, but only if it is a GNSS one.
+
+    Returns None rather than a doubtful fix. Sending a Wi-Fi-derived position
+    would hand beaconDB its own answer back as an observation.
+    """
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+    def proxy(path, iface):
+        return Gio.DBusProxy.new_sync(bus, Gio.DBusProxyFlags.NONE, None,
+                                      "org.freedesktop.GeoClue2", path, iface, None)
+
+    mgr = proxy("/org/freedesktop/GeoClue2/Manager",
+                "org.freedesktop.GeoClue2.Manager")
+    pfad = mgr.call_sync("GetClient", None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+    props = proxy(pfad, "org.freedesktop.DBus.Properties")
+
+    def setze(name, variant):
+        props.call_sync("Set", GLib.Variant("(ssv)",
+                        ("org.freedesktop.GeoClue2.Client", name, variant)),
+                        Gio.DBusCallFlags.NONE, -1, None)
+
+    setze("DesktopId", GLib.Variant("s", "furios-gps-contribute"))
+    setze("RequestedAccuracyLevel", GLib.Variant("u", 8))   # EXACT
+
+    client = proxy(pfad, "org.freedesktop.GeoClue2.Client")
+    loop = GLib.MainLoop()
+    ergebnis = {}
+
+    def on_signal(_p, _s, signal, params):
+        if signal != "LocationUpdated":
+            return
+        ort = params.unpack()[1]
+        lp = proxy(ort, "org.freedesktop.DBus.Properties")
+        werte = lp.call_sync("GetAll", GLib.Variant("(s)",
+                             ("org.freedesktop.GeoClue2.Location",)),
+                             Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+        ergebnis.update(werte)
+        loop.quit()
+
+    client.connect("g-signal", on_signal)
+    try:
+        client.call_sync("Start", None, Gio.DBusCallFlags.NONE, 15000, None)
+    except GLib.Error as e:
+        log("geoclue would not start:", e.message)
+        return None
+    GLib.timeout_add_seconds(wait_s, lambda: (loop.quit(), False)[1])
+    loop.run()
+    try:
+        client.call_sync("Stop", None, Gio.DBusCallFlags.NONE, 5000, None)
+    except GLib.Error:
+        pass
+
+    if not ergebnis:
+        return None
+
+    genauigkeit = float(ergebnis.get("Accuracy", 1e9))
+    hoehe = ergebnis.get("Altitude")
+    # geoclue reports a missing altitude as -1.8e308, not as absent.
+    hat_hoehe = hoehe is not None and hoehe > -1e300
+    if not hat_hoehe:
+        log("skipped: no altitude - that is a network fix, not GNSS")
+        return None
+    if genauigkeit > ACCURACY_MAX:
+        log(f"skipped: accuracy {genauigkeit:.0f} m is over {ACCURACY_MAX:.0f} m")
+        return None
+
+    pos = {
+        "latitude": float(ergebnis["Latitude"]),
+        "longitude": float(ergebnis["Longitude"]),
+        "accuracy": genauigkeit,
+        "altitude": float(hoehe),
+        "source": "gps",
+    }
+    for schluessel, name in (("Speed", "speed"), ("Heading", "heading")):
+        wert = ergebnis.get(schluessel)
+        if wert is not None and wert >= 0:
+            pos[name] = float(wert)
+    return pos
+
+
+def entfernung_m(a, b):
+    """Rough great-circle distance. Good to a few metres over short spans,
+    which is all this is used for."""
+    import math
+    r = 6371000.0
+    p1, p2 = math.radians(a[0]), math.radians(b[0])
+    dp = p2 - p1
+    dl = math.radians(b[1] - a[1])
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(h)))
+
+
+# ---------------------------------------------------------------- queue
+
+def queue_append(item):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    # A queue that grows without end on a phone that is never online is a bug,
+    # not patience. The oldest go first - newer observations are worth more.
+    zeilen = queue_read()
+    zeilen.append(item)
+    if len(zeilen) > QUEUE_MAX:
+        zeilen = zeilen[-QUEUE_MAX:]
+    queue_write(zeilen)
+
+
+def queue_read():
+    try:
+        with open(QUEUE) as fh:
+            return [json.loads(z) for z in fh if z.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def queue_write(zeilen):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = QUEUE + ".tmp"
+    with open(tmp, "w") as fh:
+        for z in zeilen:
+            fh.write(json.dumps(z) + "\n")
+    os.replace(tmp, QUEUE)
+
+
+# ---------------------------------------------------------------- submit
+
+def on_wifi():
+    """Only submit over Wi-Fi. Somebody who turned this on did not agree to
+    spend their mobile data allowance on it."""
+    try:
+        out = subprocess.run(["nmcli", "-t", "-f", "TYPE,STATE", "device", "status"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(z.startswith("wifi:connected") for z in out.splitlines())
+
+
+def submit(items):
+    """One request, one batch. Returns True when beaconDB took it."""
+    koerper = json.dumps({"items": items}).encode()
+    req = urllib.request.Request(ENDPOINT, data=koerper, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", USER_AGENT)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as antwort:
+            return 200 <= antwort.status < 300
+    except urllib.error.HTTPError as e:
+        # 4xx is us: a malformed report, or being asked to stop. Retrying it
+        # unchanged would be exactly the behaviour that earns a block, so the
+        # batch is dropped and the reason is said out loud.
+        log(f"refused with HTTP {e.code} - dropping this batch")
+        return e.code < 500 and None or False
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        log("could not submit:", e)
+        return False
+
+
+def flush(alles=False):
+    zeilen = queue_read()
+    if not zeilen:
+        return 0
+    if not on_wifi():
+        log("not on Wi-Fi - the queue keeps")
+        return 0
+
+    gesendet = 0
+    versuch = 0
+    while zeilen and (alles or gesendet < BATCH):
+        stapel, rest = zeilen[:BATCH], zeilen[BATCH:]
+        ergebnis = submit(stapel)
+        if ergebnis is None:            # refused, our fault - drop it
+            zeilen = rest
+            queue_write(zeilen)
+            continue
+        if not ergebnis:
+            wartezeit = BACKOFF_S[min(versuch, len(BACKOFF_S) - 1)]
+            versuch += 1
+            if versuch > len(BACKOFF_S):
+                log("giving up for now - the queue keeps")
+                break
+            log(f"backing off {wartezeit}s")
+            time.sleep(wartezeit)
+            continue
+        gesendet += len(stapel)
+        zeilen = rest
+        queue_write(zeilen)
+        versuch = 0
+        s = load_stats()
+        s["submitted"] = s.get("submitted", 0) + len(stapel)
+        s["last_submit"] = int(time.time())
+        save_stats(s)
+        if not alles:
+            break
+    return gesendet
+
+
+# ---------------------------------------------------------------- measure
+
+def measure(dry=False):
+    """One observation, or a reason why there is none."""
+    aps = scan_wifi()
+    if len(aps) < MIN_APS:
+        log(f"skipped: {len(aps)} usable access points, need {MIN_APS}")
+        return None
+
+    pos = gnss_fix()
+    if pos is None:
+        return None
+
+    s = load_stats()
+    letzte = s.get("last_position")
+    if letzte:
+        weg = entfernung_m((letzte[0], letzte[1]), (pos["latitude"], pos["longitude"]))
+        alter = time.time() - letzte[2]
+        if weg < MIN_MOVE_M and alter < MIN_AGE_S:
+            log(f"skipped: {weg:.0f} m from the last one, {alter/60:.0f} min ago")
+            return None
+
+    item = {"timestamp": int(time.time() * 1000),
+            "position": pos, "wifiAccessPoints": aps}
+    if dry:
+        log(json.dumps(item, indent=2))
+        return item
+
+    queue_append(item)
+    s["last_position"] = [pos["latitude"], pos["longitude"], time.time()]
+    s["collected"] = s.get("collected", 0) + 1
+    save_stats(s)
+    log(f"queued: {len(aps)} access points, accuracy {pos['accuracy']:.0f} m")
+    return item
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_status():
+    an = os.path.exists(MARKER)
+    s = load_stats()
+    warteschlange = len(queue_read())
+    print(f"contributing={'yes' if an else 'no'}")
+    print(f"queued={warteschlange}")
+    print(f"collected={s.get('collected', 0)}")
+    print(f"submitted={s.get('submitted', 0)}")
+    letzte = s.get("last_submit")
+    print("last_submit=" + (time.strftime("%Y-%m-%d %H:%M", time.localtime(letzte))
+                            if letzte else "never"))
+    print(f"endpoint={ENDPOINT}")
+    print()
+    print("Sent only over Wi-Fi, only from a GNSS fix, and never networks that")
+    print("are hidden or whose name ends in _nomap or _optout.")
+    return 0
+
+
+def cmd_run():
+    if not os.path.exists(MARKER):
+        log("not switched on - nothing to do")
+        return 0
+    log(f"contributing to {ENDPOINT} every {INTERVAL_S}s")
+    while True:
+        if not os.path.exists(MARKER):
+            log("switched off - stopping")
+            return 0
+        try:
+            measure()
+            flush()
+        except Exception as e:              # noqa: BLE001 - a loop that dies is worse
+            log("pass failed:", e)
+        time.sleep(INTERVAL_S)
+
+
+def main():
+    befehl = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if befehl == "status":
+        return cmd_status()
+    if befehl == "on":
+        os.makedirs(STATE_DIR, exist_ok=True)
+        open(MARKER, "w").close()
+        print("on - contributions start with the next pass")
+        return 0
+    if befehl == "off":
+        try:
+            os.remove(MARKER)
+        except OSError:
+            pass
+        print("off - nothing further is collected or sent")
+        return 0
+    if befehl == "once":
+        return 0 if measure(dry="--dry-run" in sys.argv) else 1
+    if befehl == "send":
+        n = flush(alles=True)
+        print(f"submitted {n}")
+        return 0
+    if befehl == "run":
+        return cmd_run()
+    print("usage: furios-gps-contribute [status|on|off|once [--dry-run]|send|run]",
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

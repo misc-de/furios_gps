@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+# Contributing Wi-Fi observations to beaconDB. Off unless somebody switched it
+# on: the service exits immediately when the marker is not there, so enabling
+# the unit is not the same as agreeing to send anything.
+Description=Contribute Wi-Fi observations to beaconDB
+Documentation=https://beacondb.net
+# A user service, not a system one: it asks geoclue as this session and reads
+# NetworkManager's scan as this user. Nothing here wants root.
+PartOf=graphical-session.target
+After=geoclue.service NetworkManager.service
+# No rate limit, backoff instead - see [Service].
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'c=/usr/local/bin/furios-gps-contribute; test -x "$$c" || c=/usr/bin/furios-gps-contribute; "$$c" run'
+# On the way out, hand over whatever is still queued - but only if it is
+# switched on and on Wi-Fi, both of which the tool checks itself.
+ExecStop=/bin/sh -c 'c=/usr/local/bin/furios-gps-contribute; test -x "$$c" || c=/usr/bin/furios-gps-contribute; "$$c" send >/dev/null 2>&1 || true'
+Restart=on-failure
+RestartSec=60
+# The rate limit is off and a backoff takes its place, the same decision as
+# the audio and modem watchers: a contributor that gives up silently looks to
+# its owner like one that is working.
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+[Install]
+WantedBy=default.target

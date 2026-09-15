@@ -27,6 +27,9 @@ echo "package $PKG $VERSION (all)"
 
 install -Dm755 gpsctl                 "$STAGE/usr/bin/gpsctl"
 install -Dm755 tools/furios-gps-proxy "$STAGE/usr/bin/furios-gps-proxy"
+install -Dm755 tools/furios-gps-contribute "$STAGE/usr/bin/furios-gps-contribute"
+install -Dm644 systemd/furios-gps-contribute.service \
+    "$STAGE/usr/lib/systemd/user/furios-gps-contribute.service"
 
 install -Dm644 systemd/furios-gps-proxy.service \
     "$STAGE/usr/lib/systemd/system/furios-gps-proxy.service"

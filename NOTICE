@@ -32,5 +32,23 @@ diagnostic tool, not part of what gets installed.
 
 The geolocation service the proxy talks to is BeaconDB (https://beacondb.net),
 a public instance speaking ichnaea's API. This project is not affiliated with
-it, ships no data from it, and sends it nothing that geoclue was not going to
-send it anyway.
+it and ships no data from it.
+
+Until now the sentence here also said that nothing is sent which geoclue was
+not going to send anyway. That is still true of the proxy, and no longer true
+of the whole repository: tools/furios-gps-contribute submits Wi-Fi
+observations to beaconDB's geosubmit endpoint.
+
+It is off unless somebody turns it on, and when it is on it sends the MAC
+addresses, channels and signal strengths of the networks in range together
+with a GNSS position - never the network names, never anything hidden, and
+never a network whose name ends in _nomap or _optout, which is how the owner
+of an access point says no. Those are beaconDB's own rules; the ones about
+sending only over Wi-Fi, only from a satellite fix, and rarely are ours.
+
+What that means for the people around you: the access points of neighbours and
+shops are part of what gets sent, because that is what a public geolocation
+database is made of. beaconDB obfuscates published data so that a location can
+only be retrieved by somebody who already observed the same network, and it
+delays publishing a moved access point for a year. Anyone who does not want to
+be in it adds _nomap to their SSID, and this tool honours that.

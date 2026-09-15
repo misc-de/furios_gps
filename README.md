@@ -55,6 +55,35 @@ action, which is what the switch in the `misc-de` app uses.
 `gpsctl probe` is the one worth running once. It sends a single query that is
 bound to come back as an IP fallback and shows the filter refusing it.
 
+## Contributing back
+
+The filter above refuses positions beaconDB derived from an IP address. The
+other direction is optional and off by default: handing beaconDB the
+observations that would let it answer this area properly.
+
+    furios-gps-contribute status      what it would send, and what it has
+    furios-gps-contribute on|off      switch it on or off (no root)
+    furios-gps-contribute once        one measurement, queued
+    furios-gps-contribute once --dry-run   print it instead, and send nothing
+    furios-gps-contribute send        hand over what is queued
+
+Or the switch under **Contribute to beaconDB** on the GPS page of the app.
+
+What is sent is the MAC address, channel and signal strength of the networks
+in range, with a GNSS position. What is never sent: network names, hidden
+networks, and anything whose name ends in `_nomap` or `_optout` - beaconDB's
+rules, and the way an access point owner opts out.
+
+The position has to come from satellites. geoclue can answer from a Wi-Fi
+lookup, and that lookup is answered by beaconDB itself - submitting one would
+hand the database its own estimate back as an observation. A fix is only used
+when it carries an altitude, which network-derived positions do not, and when
+it is accurate to 25 m or better.
+
+Submissions go out over Wi-Fi only, batched, minutes apart, and a refusal is
+dropped rather than retried. See [NOTICE](NOTICE) for what this means for the
+networks around you.
+
 ## Tests
 
     ./tests/run-tests.sh        # not with sudo

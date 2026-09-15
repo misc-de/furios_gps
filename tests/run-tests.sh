@@ -32,6 +32,7 @@ run() {
 
 run "the rule the proxy applies"  "$ROOT/tools/furios-gps-proxy" --self-test
 run "what gpsctl writes, and what it leaves alone" bash "$HERE/test-gpsctl.sh"
+run "contributing back, and not being a burden" bash "$HERE/test-contribute.sh"
 
 is_python() { head -1 "$1" 2>/dev/null | grep -q 'python'; }
 
@@ -64,16 +65,31 @@ printf '\n\033[1m== systemd units\033[0m\n'
 # Two complaints are expected off the device and are not defects: units this
 # one is merely ordered against may not exist here, and the programs are not in
 # /usr/bin until the package has been installed.
+# A third one joined them: this phone has a broken unit of its own in
+# /run/systemd/system/default.target.wants - a symlink literally named
+# "runonce@*.service", star included - and systemd-analyze mentions it while
+# resolving any target. It is not ours (nothing under furios- is involved) and
+# there is nothing here to fix, so it is named rather than swept up by a
+# pattern wide enough to hide our own faults too.
 noise='Unit .* not found|Command /usr/bin/(gpsctl|furios-gps-proxy) is not executable'
-[ -x /usr/bin/gpsctl ] && [ -x /usr/bin/furios-gps-proxy ] && noise='Unit .* not found'
+noise="$noise"'|Wants dependency dropin .*runonce@\*\.service is not a valid unit name'
+[ -x /usr/bin/gpsctl ] && [ -x /usr/bin/furios-gps-proxy ] \
+    && noise='Unit .* not found|Wants dependency dropin .*runonce@\*\.service is not a valid unit name'
 if ! command -v systemd-analyze >/dev/null 2>&1; then
     printf '  \033[33mskipped\033[0m - systemd-analyze not available\n'
 else
     for u in "$ROOT"/systemd/*.service; do
         [ -f "$u" ] || continue
-        if systemd-analyze verify "$u" 2>&1 | grep -vE "$noise" | grep -q .; then
+        # A user unit checked as a system one is checked against the wrong
+        # world: its targets do not exist there.
+        modus=""
+        grep -q 'WantedBy=default.target\|PartOf=graphical-session.target' "$u" \
+            && modus="--user"
+        # shellcheck disable=SC2086
+        if systemd-analyze verify $modus "$u" 2>&1 | grep -vE "$noise" | grep -q .; then
             printf '  \033[31mFAIL\033[0m %s\n' "$(basename "$u")"
-            systemd-analyze verify "$u" 2>&1 | grep -vE "$noise" | sed 's/^/       /'
+            # shellcheck disable=SC2086
+            systemd-analyze verify $modus "$u" 2>&1 | grep -vE "$noise" | sed 's/^/       /'
             FAILED=$((FAILED + 1))
         else
             printf '  \033[32mok\033[0m   %s\n' "$(basename "$u")"
