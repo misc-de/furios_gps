@@ -401,11 +401,36 @@ def measure(dry=False):
 
 # ---------------------------------------------------------------- commands
 
+def einheit(was):
+    """Start or stop our own user service, if there is one.
+
+    Never fatal: run from a checkout, or on a system where the unit was not
+    installed, the marker is still the thing that decides - and "run" can be
+    started by hand.
+    """
+    try:
+        subprocess.run(["systemctl", "--user", was,
+                        "furios-gps-contribute.service"],
+                       capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def cmd_status():
     an = os.path.exists(MARKER)
     s = load_stats()
     warteschlange = len(queue_read())
     print(f"contributing={'yes' if an else 'no'}")
+    # Two different facts, and the app shows the difference: the marker says
+    # what was asked for, the service says whether anything is happening.
+    try:
+        laeuft = subprocess.run(["systemctl", "--user", "is-active",
+                                 "furios-gps-contribute.service"],
+                                capture_output=True, text=True,
+                                timeout=15).stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        laeuft = False
+    print(f"running={'yes' if laeuft else 'no'}")
     print(f"queued={warteschlange}")
     print(f"collected={s.get('collected', 0)}")
     print(f"submitted={s.get('submitted', 0)}")
@@ -443,13 +468,21 @@ def main():
     if befehl == "on":
         os.makedirs(STATE_DIR, exist_ok=True)
         open(MARKER, "w").close()
-        print("on - contributions start with the next pass")
+        # The marker alone changes nothing: the service exits immediately when
+        # it is not there, so after an install it is enabled and already dead.
+        # Without this line the switch in the app would write a file and look
+        # like it had done something until the next login.
+        einheit("start")
+        print("on - collecting")
         return 0
     if befehl == "off":
         try:
             os.remove(MARKER)
         except OSError:
             pass
+        # The loop notices the marker is gone and stops by itself within an
+        # interval; stopping it now means "off" is true when it says so.
+        einheit("stop")
         print("off - nothing further is collected or sent")
         return 0
     if befehl == "once":
