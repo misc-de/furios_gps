@@ -39,7 +39,7 @@ ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
 m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
 ld.exec_module(m)
 
-def ausgeschlossen(ssid):
+def is_excluded(ssid):
     if not ssid.strip():
         return True
     if m.NOMAP.search(ssid.strip()):
@@ -47,7 +47,7 @@ def ausgeschlossen(ssid):
     return bool(re.search(r"(iphone|android.?ap|mobile.?hotspot|galaxy.*hotspot)",
                           ssid, re.IGNORECASE))
 
-faelle = [
+cases = [
     ("",                  True,  "hidden (no SSID)"),
     ("   ",               True,  "hidden (blank SSID)"),
     ("Cafe_nomap",        True,  "_nomap"),
@@ -58,14 +58,14 @@ faelle = [
     ("Stadtbuecherei",    False, "an ordinary network"),
     ("nomap_cafe",        False, "_nomap only counts at the end"),
 ]
-schlecht = 0
-for ssid, erwartet, was in faelle:
-    ist = ausgeschlossen(ssid)
-    ok = ist == erwartet
-    schlecht += not ok
+bad = 0
+for ssid, expected, what in cases:
+    got = is_excluded(ssid)
+    ok = got == expected
+    bad += not ok
     print(("  \033[32mok\033[0m   " if ok else "  \033[31mFAIL\033[0m ")
-          + f"{was}: {'excluded' if ist else 'sent'}")
-sys.exit(1 if schlecht else 0)
+          + f"{what}: {'excluded' if got else 'sent'}")
+sys.exit(1 if bad else 0)
 PY
 check "every exclusion rule holds" "0" "$?"
 
@@ -96,7 +96,7 @@ check "a failure backs off instead of retrying at once" "yes" \
     "$(grep -q 'BACKOFF_S' "$TOOL" && echo yes || echo no)"
 check "and eventually gives up rather than looping" "yes" \
     "$(grep -q 'giving up for now' "$TOOL" && echo yes || echo no)"
-# A 4xx means the request was wrong. Sending it again unchanged is what earns
+# A 4xx means the request what wrong. Sending it again unchanged is what earns
 # a block, so it has to be dropped rather than retried.
 check "a refused batch is dropped, not resent" "yes" \
     "$(grep -q 'dropping this batch' "$TOOL" && echo yes || echo no)"

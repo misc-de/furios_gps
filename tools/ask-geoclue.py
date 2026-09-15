@@ -40,7 +40,7 @@ def on_signal(_p, _s, signal, params):
     acc = lp.call_sync("Get", GLib.Variant("(ss)",
                        ("org.freedesktop.GeoClue2.Location", "Accuracy")),
                        Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
-    print(f"POSITION - Genauigkeit {acc:.0f} m (Koordinaten nicht ausgegeben)")
+    print(f"POSITION - accuracy {acc:.0f} m (coordinates not printed)")
     state["done"] = True
     loop.quit()
 
