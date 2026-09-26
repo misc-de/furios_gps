@@ -113,8 +113,26 @@ check "and eventually gives up rather than looping" "yes" \
     "$(grep -q 'giving up for now' "$TOOL" && echo yes || echo no)"
 # A 4xx means the request what wrong. Sending it again unchanged is what earns
 # a block, so it has to be dropped rather than retried.
-check "a refused batch is dropped, not resent" "yes" \
-    "$(grep -q 'dropping this batch' "$TOOL" && echo yes || echo no)"
+# Run, not grepped for: the message was always there, and the batch was
+# resent anyway - the expression deciding it was False for every status.
+py <<'PYEOF'
+import importlib.machinery, importlib.util, io, os, sys, tempfile, urllib.error
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+sent = []
+def refuse(req, timeout=None):
+    sent.append(req)
+    raise urllib.error.HTTPError(m.ENDPOINT, 400, "Bad Request", {}, io.BytesIO(b""))
+m.urllib.request.urlopen = refuse
+m.on_wifi = lambda: True
+m.time.sleep = lambda s: None
+m.queue_write([{"n": i} for i in range(3)])
+m.flush()
+sys.exit(0 if len(sent) == 1 and m.queue_read() == [] else 1)
+PYEOF
+check "a refused batch is dropped, not resent" "0" "$?"
 check "nothing is sent over mobile data" "yes" \
     "$(grep -q 'def on_wifi' "$TOOL" && echo yes || echo no)"
 check "the queue cannot grow without end" "yes" \

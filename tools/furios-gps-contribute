@@ -322,8 +322,14 @@ def submit(items):
         # 4xx is us: a malformed report, or being asked to stop. Retrying it
         # unchanged would be exactly the behaviour that earns a block, so the
         # batch is dropped and the reason is said out loud.
-        log(f"refused with HTTP {e.code} - dropping this batch")
-        return e.code < 500 and None or False
+        # Not "e.code < 500 and None or False": None is falsy, so that
+        # expression was False for every code, and a refused batch went round
+        # the backoff and was resent unchanged on every pass, for ever.
+        if e.code < 500:
+            log(f"refused with HTTP {e.code} - dropping this batch")
+            return None
+        log(f"server error HTTP {e.code} - keeping this batch")
+        return False
     except (urllib.error.URLError, OSError, ValueError) as e:
         log("could not submit:", e)
         return False
