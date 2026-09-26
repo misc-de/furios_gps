@@ -336,6 +336,12 @@ def submit(items):
 
 
 def flush(alles=False):
+    # "off" means nothing further is sent, and that has to hold here, where
+    # sending happens: "off" stops the unit, and the unit's ExecStop is
+    # "send" - without this check, switching off handed over the whole queue.
+    if not os.path.exists(MARKER):
+        log("switched off - the queue is not sent")
+        return 0
     zeilen = queue_read()
     if not zeilen:
         return 0

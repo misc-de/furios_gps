@@ -129,10 +129,27 @@ m.urllib.request.urlopen = refuse
 m.on_wifi = lambda: True
 m.time.sleep = lambda s: None
 m.queue_write([{"n": i} for i in range(3)])
+open(m.MARKER, "w").close()
 m.flush()
 sys.exit(0 if len(sent) == 1 and m.queue_read() == [] else 1)
 PYEOF
 check "a refused batch is dropped, not resent" "0" "$?"
+# "off" stops the unit, and its ExecStop is "send": the send itself has to
+# refuse once the marker is gone, or switching off hands over the queue.
+py <<'PYEOF'
+import importlib.machinery, importlib.util, os, sys, tempfile
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+sent = []
+m.submit = lambda items: sent.append(items) or True
+m.on_wifi = lambda: True
+m.queue_write([{"n": i} for i in range(3)])
+m.flush(alles=True)
+sys.exit(0 if sent == [] and len(m.queue_read()) == 3 else 1)
+PYEOF
+check "switched off, a send sends nothing" "0" "$?"
 check "nothing is sent over mobile data" "yes" \
     "$(grep -q 'def on_wifi' "$TOOL" && echo yes || echo no)"
 check "the queue cannot grow without end" "yes" \
