@@ -139,7 +139,9 @@ if [ "$1" = configure ]; then
     # upgrade would install new code and leave the old process in charge - and
     # the old process is exactly the one with the bug that was just fixed.
     systemctl try-restart furios-gps-proxy.service >/dev/null 2>&1 || true
-    # Put the filter in place now rather than at the next boot. Quiet, and
+    # Replay the recorded profile now rather than at the next boot - on an
+    # upgrade, that is the owner's choice. On a first install nothing is
+    # recorded and this does nothing: every option starts off. Quiet, and
     # never fatal: a package that fails to configure would leave dpkg
     # half-done, which is a worse problem than an unfiltered geoclue.
     /usr/bin/gpsctl boot --quiet || \

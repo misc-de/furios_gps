@@ -27,8 +27,9 @@ or as a package:
 
     ./packaging/build-deb.sh --install
 
-Both install the proxy, the boot unit and the polkit action, and switch the
-filter on straight away. Undo with `./uninstall.sh` or
+Both install the proxy, the boot unit and the polkit action, and switch
+nothing on: that is `sudo gpsctl set fixed`, or the switch in the app. Undo
+with `./uninstall.sh` or
 `apt remove furios-gps-fix`; geoclue's `[wifi]` section is restored to exactly
 what was in it beforehand.
 

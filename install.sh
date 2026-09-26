@@ -1,8 +1,8 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
-# Installs gpsctl, the proxy, the boot unit and the polkit action, then puts
-# the filter in place. Safe to re-run.
+# Installs gpsctl, the proxy, the boot unit and the polkit action. It does
+# not switch the filter on - "gpsctl set fixed" does. Safe to re-run.
 set -e
 cd "$(dirname "$0")"
 
@@ -55,12 +55,19 @@ sed "s|>/usr/bin/gpsctl<|>$BIN/gpsctl<|" polkit/de.misc-de.gpsctl.policy \
 sudo chmod 644 /usr/share/polkit-1/actions/de.misc-de.gpsctl.policy
 
 sudo systemctl daemon-reload
-# enable, not start: applying happens below, with output you can read.
+# The boot unit only replays a profile somebody recorded with "gpsctl set";
+# with none recorded it does nothing, so enabling it switches nothing on.
 sudo systemctl enable furios-gps-fix.service >/dev/null
 
-echo "4) applying"
-sudo "$BIN/gpsctl" apply
-
+# Not applied here: after an install every option is off until its owner
+# turns it on - and this one rewrites geoclue.conf and starts a service.
+# What an owner did turn on is kept: a running proxy gets the new code
+# (try-restart starts nothing that is stopped), and "boot" replays a recorded
+# profile and does nothing when there is none.
+sudo systemctl try-restart furios-gps-proxy.service >/dev/null 2>&1 || true
+sudo "$BIN/gpsctl" boot --quiet || true
 echo
-echo "Installed. Check any time with:  gpsctl status"
+echo "Installed. Nothing has been switched on."
+echo "Switch the filter on:            sudo gpsctl set fixed   (or the app, GPS page)"
+echo "Check any time with:             gpsctl status"
 echo "Watch one real query refused:    gpsctl probe"

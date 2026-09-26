@@ -194,9 +194,16 @@ proxy_state() {
 recorded_profile() {
     local p
     p=$(cat "$PROFILE_FILE" 2>/dev/null | tr -d '[:space:]')
-    # No file means fixed: a phone that has this package installed and has
-    # never been told otherwise is meant to be repaired.
-    [ -z "$p" ] && { echo fixed; return; }
+    # No file means nobody has chosen, and then nothing is switched: after an
+    # install every option is off until its owner turns it on. The boot unit
+    # leaves such a phone exactly as it is, so what is "recorded" is simply
+    # what is there - which also keeps "profile" from promising a return at
+    # the next boot that will not happen.
+    if [ -z "$p" ]; then
+        p=$(actual_profile)
+        [ "$p" = mixed ] && p=shipped
+        echo "$p"; return
+    fi
     case " $PROFILES " in
         *" $p "*) echo "$p" ;;
         *)        echo unknown ;;
@@ -453,6 +460,12 @@ cmd_switch() {
 # deadlock that survived the reboot.
 cmd_boot() {
     local rec
+    # Nothing recorded is nothing asked for. Applying here made the package's
+    # postinst - which runs this - switch the filter on by being installed.
+    if [ -z "$(tr -d '[:space:]' < "$PROFILE_FILE" 2>/dev/null)" ]; then
+        say "No profile recorded - leaving geoclue as it is (switch on with: gpsctl set fixed)."
+        return 0
+    fi
     rec=$(recorded_profile)
     case "$rec" in
         unknown)

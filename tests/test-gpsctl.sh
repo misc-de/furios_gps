@@ -114,7 +114,12 @@ check "half a config change reads as mixed" \
     "mixed" "$("$GPSCTL" profile | sed -n 's/^actual: *//p')"
 
 fresh
-check "no recorded profile means fixed" "fixed" "$("$GPSCTL" profile | sed -n 's/^recorded: *//p')"
+# After an install every option is off until its owner turns it on. The
+# package's postinst runs "boot", so boot with nothing recorded must leave the
+# shipped file alone - it used to read "no file" as "fixed" and apply.
+check "no recorded profile is not a choice: boot switches nothing on" \
+    "same" "$(g boot >/dev/null; cmp -s "$SHIPPED" "$GPSCTL_CONF" && echo same || echo different)"
+check "and profile does not claim one" "shipped" "$("$GPSCTL" profile | sed -n 's/^recorded: *//p')"
 echo "sideways" > "$GPSCTL_PROFILE"
 check "a profile nobody understands is not guessed at" \
     "unknown" "$("$GPSCTL" profile | sed -n 's/^recorded: *//p')"
