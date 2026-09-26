@@ -20,6 +20,21 @@ trap 'rm -rf "$TMP"' EXIT
 
 py() { CONTRIB_STATE="$TMP/state" python3 - "$TOOL" "$@"; }
 
+# "on" and "off" start and stop the user unit, and on the phone this suite
+# runs on, that unit is installed and enabled. A test run must not start or
+# stop it - stopping runs its ExecStop, which hands the real queue to
+# beaconDB. So the unit name points at nothing, and a systemctl stub first on
+# the PATH writes every call down instead of making it.
+export CONTRIB_UNIT="furios-gps-contribute-test-does-not-exist.service"
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/systemctl" <<STUB
+#!/bin/sh
+echo "\$*" >> "$TMP/systemctl.log"
+exit 3
+STUB
+chmod +x "$TMP/bin/systemctl"
+export PATH="$TMP/bin:$PATH"
+
 # --- what beaconDB requires -------------------------------------------------
 
 check "submissions go to beaconDB's geosubmit endpoint" "yes" \
@@ -133,6 +148,8 @@ check "and switching off stops it" "yes" \
     "$(grep -q 'einheit("stop")' "$TOOL" && echo yes || echo no)"
 check "status says whether anything is actually running" "yes" \
     "$(CONTRIB_STATE="$TMP/state" "$TOOL" status | grep -q '^running=' && echo yes || echo no)"
+check "a test run never starts or stops the installed unit" "0" \
+    "$(grep -c 'furios-gps-contribute\.service' "$TMP/systemctl.log" 2>/dev/null)"
 # Run from a checkout there is no unit, and that must not be an error.
 check "a missing unit is not fatal" "0" \
     "$(CONTRIB_STATE="$TMP/state2" "$TOOL" on >/dev/null 2>&1; echo $?)"

@@ -69,6 +69,11 @@ STATE_DIR = os.environ.get(
     os.path.join(os.environ.get("XDG_CONFIG_HOME",
                                 os.path.expanduser("~/.config")), "furios-gps"))
 MARKER = os.path.join(STATE_DIR, "contribute")     # exists = switched on
+# The user unit "on" and "off" start and stop. Overridable for the same reason
+# as the state directory: the tests switch this on and off, and on the phone
+# they run on, the real unit is installed - starting and stopping it from a
+# test run would be the suite reaching into the live system it is testing.
+UNIT = os.environ.get("CONTRIB_UNIT", "furios-gps-contribute.service")
 QUEUE = os.path.join(STATE_DIR, "queue.jsonl")
 STATS = os.path.join(STATE_DIR, "contribute-stats.json")
 
@@ -469,8 +474,7 @@ def einheit(was):
     started by hand.
     """
     try:
-        subprocess.run(["systemctl", "--user", was,
-                        "furios-gps-contribute.service"],
+        subprocess.run(["systemctl", "--user", was, UNIT],
                        capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -484,8 +488,7 @@ def cmd_status():
     # Two different facts, and the app shows the difference: the marker says
     # what was asked for, the service says whether anything is happening.
     try:
-        laeuft = subprocess.run(["systemctl", "--user", "is-active",
-                                 "furios-gps-contribute.service"],
+        laeuft = subprocess.run(["systemctl", "--user", "is-active", UNIT],
                                 capture_output=True, text=True,
                                 timeout=15).stdout.strip() == "active"
     except (OSError, subprocess.SubprocessError):
