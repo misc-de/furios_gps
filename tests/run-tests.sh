@@ -29,6 +29,7 @@ run() {
 }
 
 run "contributing back, and not being a burden" bash "$HERE/test-contribute.sh"
+run "Firefox waits for the fix, and leaves the rest alone" bash "$HERE/test-firefox.sh"
 
 is_python() { head -1 "$1" 2>/dev/null | grep -q 'python'; }
 
@@ -71,7 +72,7 @@ noise='Unit .* not found|Wants dependency dropin .*runonce@\*\.service is not a 
 if ! command -v systemd-analyze >/dev/null 2>&1; then
     printf '  \033[33mskipped\033[0m - systemd-analyze not available\n'
 else
-    for u in "$ROOT"/systemd/*.service; do
+    for u in "$ROOT"/systemd/*.service "$ROOT"/systemd/*.path; do
         [ -f "$u" ] || continue
         # A user unit checked as a system one is checked against the wrong
         # world: its targets do not exist there.

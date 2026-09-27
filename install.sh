@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
-# Installs furios-gps-contribute and its user unit - for this user, no root.
+# Installs furios-gps-contribute, furios-gps-firefox and their user units - for this user, no root.
 # It does not switch contributing on: "furios-gps-contribute on" does, or the
 # switch in the app. Safe to re-run.
 set -e
@@ -11,10 +11,14 @@ BIN=$HOME/.local/bin
 
 echo "1) program"
 install -Dm755 tools/furios-gps-contribute "$BIN/furios-gps-contribute"
+install -Dm755 tools/furios-gps-firefox "$BIN/furios-gps-firefox"
 
 echo "2) user unit"
 install -Dm644 systemd/furios-gps-contribute.service \
     "$HOME/.config/systemd/user/furios-gps-contribute.service"
+for u in furios-gps-firefox.service furios-gps-firefox.path; do
+    install -Dm644 "systemd/$u" "$HOME/.config/systemd/user/$u"
+done
 systemctl --user daemon-reload 2>/dev/null || true
 # A running service gets the new code; a stopped one stays stopped.
 systemctl --user try-restart furios-gps-contribute.service >/dev/null 2>&1 || true
@@ -33,3 +37,4 @@ echo
 echo "Installed. Nothing has been switched on."
 echo "Switch contributing on:  furios-gps-contribute on   (or the app, GPS page)"
 echo "See what it would send:  furios-gps-contribute once --dry-run"
+echo "Firefox/web apps wait for the GNSS fix:  furios-gps-firefox on"

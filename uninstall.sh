@@ -13,8 +13,19 @@ for c in "$HOME/.local/bin/furios-gps-contribute" \
     [ -x "$c" ] && { "$c" off >/dev/null 2>&1 || true; break; }
 done
 systemctl --user disable --now furios-gps-contribute.service >/dev/null 2>&1 || true
+# The Firefox prefs come out of every profile before the tool that knows them
+# goes; a profile open right now keeps its prefs.js values until it is closed
+# and "furios-gps-firefox off" runs again - said, not hidden.
+for c in "$HOME/.local/bin/furios-gps-firefox" /usr/bin/furios-gps-firefox; do
+    [ -x "$c" ] && { "$c" off || true; break; }
+done
+systemctl --user disable --now furios-gps-firefox.path furios-gps-firefox.service \
+    >/dev/null 2>&1 || true
 rm -f "$HOME/.config/systemd/user/furios-gps-contribute.service" \
-      "$HOME/.local/bin/furios-gps-contribute"
+      "$HOME/.config/systemd/user/furios-gps-firefox.service" \
+      "$HOME/.config/systemd/user/furios-gps-firefox.path" \
+      "$HOME/.local/bin/furios-gps-contribute" \
+      "$HOME/.local/bin/furios-gps-firefox"
 systemctl --user daemon-reload 2>/dev/null || true
 
 # The retired filter, as versions before 27.9.2026 installed it. Only with

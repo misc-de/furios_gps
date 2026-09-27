@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+"""Lets Firefox - and every web app built on it - wait for the GNSS fix.
+
+Firefox asks geoclue for a position and gives up after 12 seconds
+(geo.provider.geoclue.mls_fallback_timeout_ms). On this phone a cold GNSS fix
+takes 30 to 80 seconds, so a map in a web app never sees one and says "no
+location" while geoclue is still getting there. Measured on 27.9.2026 with the
+Google Maps web app: with the three prefs below it finds the position after a
+longer search, without them never.
+
+  geo.provider.use_mls = false
+      no fallback to Mozilla's location service, which is gone anyway
+  geo.provider.geoclue.mls_fallback_timeout_ms = 180000
+      three minutes instead of twelve seconds
+  geo.provider.geoclue.always_high_accuracy = true
+      always ask geoclue for GNSS, not for whatever answers first
+
+It is off until somebody switches it on. On, it writes a marked block into
+user.js of every profile in profiles.ini, and a path unit repeats that when a
+new profile appears (the web app manager makes one per app). The web app
+manager rewrites only its own block in user.js and keeps everything else, so
+ours survives it.
+
+Off takes the block out again. Firefox copies user.js into prefs.js while it
+runs, so the values stay in prefs.js until they are removed there too - which
+can only happen while that profile is closed, because Firefox writes prefs.js
+on exit. A profile that is open during "off" is cleaned up at the next login;
+until then status says how many are left.
+"""
+import configparser
+import os
+import re
+import subprocess
+import sys
+
+PREFS = [
+    ("geo.provider.use_mls", "false"),
+    ("geo.provider.geoclue.mls_fallback_timeout_ms", "180000"),
+    ("geo.provider.geoclue.always_high_accuracy", "true"),
+]
+START = "// FURIOS GPS START - furios-gps-firefox, do not edit inside\n"
+END = "// FURIOS GPS END\n"
+# What was written by hand on 27.9.2026, before this tool existed. Taken over,
+# so a profile does not carry the prefs twice.
+LEGACY = "// GPS: wait for geoclue's GNSS fix instead of giving up after 12 s\n"
+
+ROOT = os.environ.get("FURIOS_FIREFOX_ROOT",
+                      os.path.expanduser("~/.mozilla/firefox"))
+STATE_DIR = os.environ.get(
+    "CONTRIB_STATE",
+    os.path.join(os.environ.get("XDG_CONFIG_HOME",
+                                os.path.expanduser("~/.config")), "furios-gps"))
+MARKER = os.path.join(STATE_DIR, "firefox-wait")    # exists = switched on
+# Overridable for the same reason as in furios-gps-contribute: the tests must
+# not enable or disable the units installed on the phone they run on.
+UNITS = os.environ.get("FIREFOX_UNITS",
+                       "furios-gps-firefox.path furios-gps-firefox.service").split()
+
+BLOCK = START + "".join(f'user_pref("{k}", {v});\n' for k, v in PREFS) + END
+BLOCK_RE = re.compile(re.escape(START) + r".*?" + re.escape(END), re.S)
+LEGACY_RE = re.compile(re.escape(LEGACY) + r"(?:user_pref\(\"geo\.provider\.[^\n]*\n)*")
+
+
+def profiles():
+    """Every profile directory profiles.ini names and that exists."""
+    ini = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        ini.read(os.path.join(ROOT, "profiles.ini"), encoding="utf-8")
+    except (OSError, configparser.Error):
+        return []
+    found = []
+    for sec in ini.sections():
+        path = ini.get(sec, "Path", fallback=None)
+        if not path or not sec.startswith("Profile"):
+            continue
+        if ini.get(sec, "IsRelative", fallback="1") == "1":
+            path = os.path.join(ROOT, path)
+        if os.path.isdir(path) and path not in found:
+            found.append(path)
+    return found
+
+
+def in_use(profile):
+    """True while a Firefox has the profile open.
+
+    Firefox leaves a symlink "lock" pointing at "address:+pid". A crash leaves
+    it behind, so the pid is what counts, not the link.
+    """
+    try:
+        target = os.readlink(os.path.join(profile, "lock"))
+    except OSError:
+        return False
+    m = re.search(r"\+(\d+)$", target)
+    return bool(m) and os.path.exists(f"/proc/{m.group(1)}")
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def write(path, text):
+    """Through a temp file and rename: a half-written user.js is a profile
+    Firefox reads with prefs missing and says nothing about."""
+    tmp = path + ".furios-gps.tmp"
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    except FileNotFoundError:
+        os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def without_block(text):
+    return LEGACY_RE.sub("", BLOCK_RE.sub("", text))
+
+
+def has_block(profile):
+    """Ours, or the hand-written one from before - either keeps the prefs in
+    place, so neither is something "off" left behind."""
+    text = read(os.path.join(profile, "user.js"))
+    return BLOCK in text or LEGACY in text
+
+
+def ours_in_prefs(text):
+    """Lines in prefs.js that carry our value - only those. A value somebody
+    set by hand in about:config is theirs and stays."""
+    want = {f'user_pref("{k}", {v});' for k, v in PREFS}
+    return [z for z in text.splitlines() if z.strip() in want]
+
+
+def put(profile):
+    path = os.path.join(profile, "user.js")
+    text = read(path)
+    rest = without_block(text)
+    new = rest.rstrip("\n") + ("\n" if rest.strip() else "") + BLOCK
+    if new != text:
+        write(path, new)
+        return True
+    return False
+
+
+def take(profile):
+    """Block out of user.js, our values out of prefs.js. Returns False when
+    prefs.js could not be cleaned because the profile is open."""
+    path = os.path.join(profile, "user.js")
+    text = read(path)
+    rest = without_block(text)
+    if rest != text:
+        write(path, rest.rstrip("\n") + "\n" if rest.strip() else "")
+    prefs = os.path.join(profile, "prefs.js")
+    ptext = read(prefs)
+    drop = ours_in_prefs(ptext)
+    if not drop:
+        return True
+    if in_use(profile):
+        return False
+    keep = [z for z in ptext.splitlines(keepends=True)
+            if z.strip() not in {d.strip() for d in drop}]
+    write(prefs, "".join(keep))
+    return True
+
+
+def units(verb):
+    try:
+        subprocess.run(["systemctl", "--user", verb, *UNITS],
+                       capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def cmd_apply():
+    """What the units run: bring every profile in line with the marker."""
+    alle = profiles()
+    if os.path.exists(MARKER):
+        changed = sum(put(p) for p in alle)
+        print(f"on - {changed} profile(s) updated, {len(alle)} in all")
+        return 0
+    left = sum(not take(p) for p in alle)
+    if left:
+        print(f"off - {left} profile(s) open, cleaned up at the next login")
+        return 0
+    # Nothing left anywhere: the units have no more work and step aside.
+    units("disable")
+    print("off - no profile carries the prefs")
+    return 0
+
+
+def cmd_status():
+    alle = profiles()
+    an = os.path.exists(MARKER)
+    mit = sum(has_block(p) for p in alle)
+    rest = sum(bool(ours_in_prefs(read(os.path.join(p, "prefs.js"))))
+               for p in alle if not has_block(p))
+    print(f"firefox_wait={'yes' if an else 'no'}")
+    print(f"profiles={len(alle)}")
+    print(f"patched={mit}")
+    print(f"leftover={rest}")
+    print()
+    print("Firefox and its web apps wait up to 3 minutes for the satellite fix")
+    print("instead of 12 seconds. Takes effect when an app is next started.")
+    return 0
+
+
+def main():
+    befehl = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if befehl == "status":
+        return cmd_status()
+    if befehl == "apply":
+        return cmd_apply()
+    if befehl == "on":
+        os.makedirs(STATE_DIR, exist_ok=True)
+        open(MARKER, "w").close()
+        cmd_apply()
+        # The path unit catches profiles made later, the service the login.
+        units("enable")
+        print("Restart an open web app for it to take effect.")
+        return 0
+    if befehl == "off":
+        try:
+            os.remove(MARKER)
+        except OSError:
+            pass
+        # Units stay enabled while an open profile still has to be cleaned;
+        # apply disables them once nothing is left.
+        return cmd_apply()
+    print("usage: furios-gps-firefox [status|on|off|apply]", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

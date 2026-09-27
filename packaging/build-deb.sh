@@ -28,6 +28,10 @@ echo "package $PKG $VERSION (all)"
 install -Dm755 tools/furios-gps-contribute "$STAGE/usr/bin/furios-gps-contribute"
 install -Dm644 systemd/furios-gps-contribute.service \
     "$STAGE/usr/lib/systemd/user/furios-gps-contribute.service"
+install -Dm755 tools/furios-gps-firefox "$STAGE/usr/bin/furios-gps-firefox"
+for u in furios-gps-firefox.service furios-gps-firefox.path; do
+    install -Dm644 "systemd/$u" "$STAGE/usr/lib/systemd/user/$u"
+done
 
 install -Dm644 README.md   "$STAGE/usr/share/doc/$PKG/README.md"
 install -Dm644 FINDINGS.md "$STAGE/usr/share/doc/$PKG/FINDINGS.md"
@@ -85,6 +89,10 @@ Description: Contributes Wi-Fi observations to beaconDB, off until switched on
  fixes are used, hidden networks and names ending in _nomap or _optout are
  never collected, and submissions go out over Wi-Fi only, batched and minutes
  apart. Nothing is collected or sent until "furios-gps-contribute on".
+ .
+ Also carries furios-gps-firefox, which lets Firefox and its web apps wait
+ for the satellite fix instead of giving up after 12 seconds - likewise off
+ until "furios-gps-firefox on".
 CONTROL
 
 # No maintainer scripts: the unit is a user unit and stays off, and the tool

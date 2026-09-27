@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+# Brings every Firefox profile in line with the switch: the GPS prefs in when
+# it is on, out again when it is off. Runs at login (a profile that was open
+# during "off" can only be cleaned then) and from furios-gps-firefox.path
+# when a new profile appears. Enabled by "furios-gps-firefox on", never by an
+# installation.
+Description=Let Firefox wait for the GNSS fix
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'c=%h/.local/bin/furios-gps-firefox; test -x "$$c" || c=/usr/bin/furios-gps-firefox; "$$c" apply'
+
+[Install]
+WantedBy=default.target

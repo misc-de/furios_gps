@@ -48,6 +48,28 @@ Submissions go out over Wi-Fi only, batched, minutes apart, and a refusal is
 dropped rather than retried. See [NOTICE](NOTICE) for what this means for the
 networks around you.
 
+## Firefox and web apps: wait for the fix
+
+Firefox asks geoclue for a position and gives up after 12 seconds; a cold
+GNSS fix on this phone takes 30 to 80. A map in a Firefox web app then shows
+no location while geoclue is still getting there.
+
+    furios-gps-firefox status     how many profiles carry the prefs
+    furios-gps-firefox on|off     switch it on or off (no root)
+
+On writes three prefs into `user.js` of every profile in `profiles.ini`, in a
+marked block (no fallback to Mozilla's location service, 3 minutes instead of
+12 seconds, always ask for GNSS). A path unit gives new web app profiles the
+same. The web app manager keeps everything outside its own block, so ours
+survives it. Open apps pick it up when they are next started.
+
+Off takes the block out again, and the values Firefox copied into `prefs.js`
+with it - only those, not a value somebody set in `about:config`. A profile
+that is open at that moment is cleaned at the next login. `apt remove` does
+not do this; run `furios-gps-firefox off` first.
+
+Or the switch under **Firefox and web apps** on the GPS page of the app.
+
 ## Tests
 
     ./tests/run-tests.sh        # not with sudo

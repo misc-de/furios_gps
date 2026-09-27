@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+# The web app manager adds a profile to profiles.ini for every new app; this
+# gives that profile the GPS prefs too.
+Description=Watch for new Firefox profiles
+
+[Path]
+PathChanged=%h/.mozilla/firefox/profiles.ini
+Unit=furios-gps-firefox.service
+
+[Install]
+WantedBy=default.target
