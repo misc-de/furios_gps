@@ -27,8 +27,6 @@ sudo rm -f /etc/furios-gps-fix.profile /etc/furios-gps-fix.shipped
 sudo systemctl daemon-reload
 
 echo
-echo "Removed, and geoclue is back to what it shipped with."
-echo
-echo "Note what that means: the Wi-Fi source is off again, so geoclue works out"
-echo "where this phone is from its IP address - on mobile data, the carrier's"
-echo "exit node. That is the state the phone came in, not a private one."
+echo "Removed, and geoclue.conf is back to what the package shipped."
+echo "geoclue 2.7.1-3+furios7 and later keep the Wi-Fi source on and discard"
+echo "IP-derived positions themselves - the job this filter used to do."
