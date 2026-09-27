@@ -1,43 +1,26 @@
 Licence notice for furios_gps
 =============================
 
-Everything in this repository that we wrote is MIT (see LICENSE): gpsctl, the
-proxy, the units, the polkit action, the installer, the tests, the packaging.
-Every one of those files carries an SPDX header saying so.
+Everything in this repository is MIT (see LICENSE) and ours: the
+contribution tool, its unit, the installer, the tests, the packaging. Every
+one of those files carries an SPDX header saying so.
 
-There is one file here we did not write:
+Until 27.9.2026 this repository also carried a location filter - gpsctl, a
+proxy, and a byte-for-byte copy of geoclue's own geoclue.conf (GPL-2.0+) for
+revert and the tests. geoclue now refuses IP-derived positions itself, so the
+filter is retired and that copy is no longer here; it remains in the git
+history.
 
-    original-files/geoclue.conf
+Both tools use GLib and Gio (LGPL-2.1+) through PyGObject (LGPL-2.1+):
+tools/furios-gps-contribute to ask geoclue and NetworkManager, and
+tools/ask-geoclue.py, a diagnostic that is not installed.
 
-It is geoclue's own configuration file, as the geoclue-2.0 package installs it
-on FuriOS, kept byte for byte. It is here for two reasons: the tests need a
-real file to work on rather than a fixture somebody invented, and `gpsctl
-revert` needs to know what the shipped values were. It is not modified, not
-patched, and not installed over anybody's copy - the .deb puts it under
-/usr/share/furios-gps-fix/ and never into /etc, because geoclue.conf is
-geoclue's conffile and a second package writing one is how a package upgrade
-starts asking people which version of a file they want.
-
-geoclue is GPL-2.0-or-later, Copyright the geoclue authors.
-
-Nothing here is a derived work of geoclue's code. The change this project makes
-to geoclue is to two values in its configuration file, at runtime, on the
-machine it is installed on - which is what a configuration file is for.
-
-The proxy itself uses nothing but the Python standard library. One tool
-beside it, tools/ask-geoclue.py, uses GLib and Gio (LGPL-2.1+) through
-PyGObject (LGPL-2.1+) - it has to, because geoclue ties a client to the D-Bus
-connection that asked for it, so single gdbus calls measure nothing. It is a
-diagnostic tool, not part of what gets installed.
-
-The geolocation service the proxy talks to is BeaconDB (https://beacondb.net),
+The geolocation service this talks to is BeaconDB (https://beacondb.net),
 a public instance speaking ichnaea's API. This project is not affiliated with
 it and ships no data from it.
 
-Until now the sentence here also said that nothing is sent which geoclue was
-not going to send anyway. That is still true of the proxy, and no longer true
-of the whole repository: tools/furios-gps-contribute submits Wi-Fi
-observations to beaconDB's geosubmit endpoint.
+tools/furios-gps-contribute submits Wi-Fi observations to beaconDB's
+geosubmit endpoint.
 
 It is off unless somebody turns it on, and when it is on it sends the MAC
 addresses, channels and signal strengths of the networks in range together

@@ -7,7 +7,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-PKG="furios-gps-fix"
+PKG="furios-gps-contribute"
 # The commit COUNT leads the version, not the hash: dpkg compares digit runs
 # numerically and anything else as text, so a hash would decide the order
 # between two builds - and hashes are not monotonic.
@@ -25,29 +25,9 @@ trap 'rm -rf "$STAGE"' EXIT
 chmod 755 "$STAGE"
 echo "package $PKG $VERSION (all)"
 
-install -Dm755 gpsctl                 "$STAGE/usr/bin/gpsctl"
-install -Dm755 tools/furios-gps-proxy "$STAGE/usr/bin/furios-gps-proxy"
 install -Dm755 tools/furios-gps-contribute "$STAGE/usr/bin/furios-gps-contribute"
 install -Dm644 systemd/furios-gps-contribute.service \
     "$STAGE/usr/lib/systemd/user/furios-gps-contribute.service"
-
-install -Dm644 systemd/furios-gps-proxy.service \
-    "$STAGE/usr/lib/systemd/system/furios-gps-proxy.service"
-install -Dm644 systemd/furios-gps-fix.service \
-    "$STAGE/usr/lib/systemd/system/furios-gps-fix.service"
-
-# Straight into place, not under /usr/share: polkit reads its actions from this
-# directory only, and the file describes what this package's own /usr/bin/gpsctl
-# is allowed to do - so it belongs to the package and goes away with it.
-install -Dm644 polkit/de.misc-de.gpsctl.policy \
-    "$STAGE/usr/share/polkit-1/actions/de.misc-de.gpsctl.policy"
-
-# The file FuriOS ships, kept for what revert falls back to and for the tests.
-# Under /usr/share and never copied into /etc: geoclue.conf is geoclue's
-# conffile, and a second package writing one is how an upgrade starts asking
-# people which version of a file they want.
-install -Dm644 original-files/geoclue.conf \
-    "$STAGE/usr/share/$PKG/original-files/geoclue.conf"
 
 install -Dm644 README.md   "$STAGE/usr/share/doc/$PKG/README.md"
 install -Dm644 FINDINGS.md "$STAGE/usr/share/doc/$PKG/FINDINGS.md"
@@ -62,13 +42,6 @@ Source: https://github.com/misc-de/furios_gps
 Files: *
 Copyright: 2026 misc-de
 License: MIT
-
-Files: original-files/geoclue.conf
-Copyright: 2026 The GeoClue authors
-Comment: The configuration file as the geoclue-2.0 package ships it, kept
- unmodified so that revert has somewhere to go and the tests have something
- real to work on. Not installed into /etc by this package.
-License: GPL-2.0+
 
 License: MIT
  Permission is hereby granted, free of charge, to any person obtaining a
@@ -89,16 +62,13 @@ License: MIT
  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-License: GPL-2.0+
- On Debian systems the full text is in
- /usr/share/common-licenses/GPL-2.
 COPY
 chmod 644 "$STAGE/usr/share/doc/$PKG/copyright"
 
 mkdir -p "$STAGE/DEBIAN"
-# geoclue-2.0 because there is nothing to configure without it. python3 because
-# the proxy is written in it. curl only for "gpsctl probe", which is one
-# command out of ten - a Recommends, not a Depends.
+# python3-gi because the tool asks geoclue and NetworkManager over D-Bus.
+# Replaces the package this one used to be: the location filter it carried is
+# retired, and geoclue itself now refuses IP-derived positions.
 cat > "$STAGE/DEBIAN/control" <<CONTROL
 Package: $PKG
 Version: $VERSION
@@ -106,86 +76,19 @@ Architecture: all
 Maintainer: misc-de <11610690+misc-de@users.noreply.github.com>
 Section: utils
 Priority: optional
-Depends: geoclue-2.0, python3, systemd
-Recommends: curl
-Description: Stops geoclue believing the carrier's IP address is where you are
- Asked where the phone is with no Wi-Fi it recognises, a geolocation service
- does not answer "I do not know": it answers with the location of the IP
- address that asked, which on mobile data is the carrier's NAT exit - a fixed
- point tens to hundreds of kilometres away. The answer is marked as such in
- the reply, and geoclue does not look at the marking. It publishes the position,
- and because the Wi-Fi source answers long before GNSS has a fix, that is what
- every app on the phone is told first.
- .
- This package puts a proxy on loopback between geoclue's Wi-Fi source and the
- service, throws away the answers that carry the marking, and leaves the real
- GNSS fix as the only thing anybody is told. gpsctl switches it on and off,
- says which state the phone is in, and counts what has been refused.
+Depends: geoclue-2.0, python3, python3-gi, systemd
+Replaces: furios-gps-fix
+Conflicts: furios-gps-fix
+Description: Contributes Wi-Fi observations to beaconDB, off until switched on
+ Hands beaconDB the Wi-Fi networks in range together with a satellite
+ position, so that Wi-Fi location works in places it does not yet. Only GNSS
+ fixes are used, hidden networks and names ending in _nomap or _optout are
+ never collected, and submissions go out over Wi-Fi only, batched and minutes
+ apart. Nothing is collected or sent until "furios-gps-contribute on".
 CONTROL
 
-cat > "$STAGE/DEBIAN/postinst" <<'POST'
-#!/bin/sh
-set -e
-if [ "$1" = configure ]; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    # The hand-rolled ancestor of this package wants the same port, and two
-    # services fighting over one means the loser dies at every boot.
-    if systemctl cat beacondb-proxy.service >/dev/null 2>&1; then
-        systemctl disable --now beacondb-proxy.service >/dev/null 2>&1 || true
-        echo "furios-gps-fix: disabled beacondb-proxy.service - it wants the same port" >&2
-    fi
-    systemctl enable furios-gps-fix.service >/dev/null 2>&1 || true
-    # "enable --now" does NOT restart a unit that is already running, so an
-    # upgrade would install new code and leave the old process in charge - and
-    # the old process is exactly the one with the bug that was just fixed.
-    systemctl try-restart furios-gps-proxy.service >/dev/null 2>&1 || true
-    # Replay the recorded profile now rather than at the next boot - on an
-    # upgrade, that is the owner's choice. On a first install nothing is
-    # recorded and this does nothing: every option starts off. Quiet, and
-    # never fatal: a package that fails to configure would leave dpkg
-    # half-done, which is a worse problem than an unfiltered geoclue.
-    /usr/bin/gpsctl boot --quiet || \
-        echo "furios-gps-fix: could not apply everything - run 'gpsctl status'" >&2
-fi
-exit 0
-POST
-chmod 755 "$STAGE/DEBIAN/postinst"
-
-cat > "$STAGE/DEBIAN/prerm" <<'PRE'
-#!/bin/sh
-set -e
-case "$1" in
-remove)
-    # Put geoclue.conf back while gpsctl is still here to do it with. After
-    # the binary is gone the file would stay pointed at a proxy that no longer
-    # exists - a phone with no Wi-Fi location at all, and nothing installed to
-    # explain why.
-    /usr/bin/gpsctl revert --quiet || true
-    systemctl disable --now furios-gps-proxy.service >/dev/null 2>&1 || true
-    systemctl disable --now furios-gps-fix.service >/dev/null 2>&1 || true
-    ;;
-esac
-exit 0
-PRE
-chmod 755 "$STAGE/DEBIAN/prerm"
-
-# Nothing on upgrade: the config this package writes is what the new postinst
-# is about to write again anyway, and reverting in between would leave an
-# upgrade that stops halfway with an unfiltered geoclue.
-
-cat > "$STAGE/DEBIAN/postrm" <<'POSTRM'
-#!/bin/sh
-set -e
-if [ "$1" = purge ]; then
-    # The recorded profile and the recorded shipped values describe a package
-    # that is no longer here. On remove they stay, so reinstalling remembers
-    # the choice; on purge they go, like any other state.
-    rm -f /etc/furios-gps-fix.profile /etc/furios-gps-fix.shipped
-fi
-systemctl daemon-reload >/dev/null 2>&1 || true
-exit 0
-POSTRM
-chmod 755 "$STAGE/DEBIAN/postrm"
+# No maintainer scripts: the unit is a user unit and stays off, and the tool
+# does nothing without the marker its owner places.
 
 rm -f "$ROOT/packaging/${PKG}_"*.deb
 OUT="$ROOT/packaging/${PKG}_${VERSION}_all.deb"

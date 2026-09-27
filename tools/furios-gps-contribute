@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT
 """Contributes Wi-Fi observations to beaconDB - carefully, or not at all.
 
-This is the other half of what this repository does. The proxy refuses
-positions beaconDB derived from an IP address; this hands beaconDB the
+This is what is left of this repository since 27.9.2026: the location filter
+it started with is retired, because geoclue now refuses IP-derived positions
+itself. What remains is the other direction - handing beaconDB the
 observations that would let it answer properly next time, for this area.
 
 It is off unless somebody turns it on. Everything below exists to make sure

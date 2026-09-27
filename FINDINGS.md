@@ -1,5 +1,10 @@
 # What we found out
 
+> Most of this file is about the location filter, which is retired since
+> 27.9.2026: geoclue 2.7.1-3+furios7 refuses IP-derived positions itself. It
+> stays as the record of why the filter existed; `gpsctl` and the proxy are in
+> the git history.
+
 The README says what this does and how to run it. This file says *why*: what
 was measured, on which device, and what the measurements mean - including the
 one that argues against this project rather than for it.

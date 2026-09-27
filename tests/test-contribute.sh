@@ -232,6 +232,11 @@ check "it is installed and removed with everything else" "yes" \
        && grep -q 'furios-gps-contribute' "$ROOT/uninstall.sh" && echo yes || echo no)"
 check "the package ships it too" "yes" \
     "$(grep -q 'furios-gps-contribute' "$ROOT/packaging/build-deb.sh" && echo yes || echo no)"
+# Nothing on the contributing side wants root, so neither does installing it.
+check "install.sh asks for no root" "0" \
+    "$(grep -v '^ *#' "$ROOT/install.sh" | grep -c 'sudo')"
+check "the unit finds the tool where install.sh puts it" "yes" \
+    "$(grep -q '%h/.local/bin/furios-gps-contribute' "$UNIT" && echo yes || echo no)"
 if command -v systemd-analyze >/dev/null 2>&1; then
     check "systemd accepts every key in it" "" \
         "$(systemd-analyze verify --user "$UNIT" 2>&1 | grep -iE 'unknown key|unknown lvalue' | head -1)"
