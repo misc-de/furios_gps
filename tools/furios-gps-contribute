@@ -479,14 +479,14 @@ def measure(dry=False):
 # ---------------------------------------------------------------- commands
 
 def einheit(was):
-    """Start or stop our own user service, if there is one.
+    """Switch our own user service on or off, if there is one.
 
     Never fatal: run from a checkout, or on a system where the unit was not
     installed, the marker is still the thing that decides - and "run" can be
     started by hand.
     """
     try:
-        subprocess.run(["systemctl", "--user", was, UNIT],
+        subprocess.run(["systemctl", "--user", was, "--now", UNIT],
                        capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -543,11 +543,10 @@ def main():
     if befehl == "on":
         os.makedirs(STATE_DIR, exist_ok=True)
         open(MARKER, "w").close()
-        # The marker alone changes nothing: the service exits immediately when
-        # it is not there, so after an install it is enabled and already dead.
-        # Without this line the switch in the app would write a file and look
-        # like it had done something until the next login.
-        einheit("start")
+        # The marker alone changes nothing: after an installation the service
+        # is neither enabled nor running - everything is off until somebody
+        # switches it on. enable --now starts it and keeps it across logins.
+        einheit("enable")
         print("on - collecting")
         return 0
     if befehl == "off":
@@ -557,7 +556,7 @@ def main():
             pass
         # The loop notices the marker is gone and stops by itself within an
         # interval; stopping it now means "off" is true when it says so.
-        einheit("stop")
+        einheit("disable")
         print("off - nothing further is collected or sent")
         return 0
     if befehl == "once":

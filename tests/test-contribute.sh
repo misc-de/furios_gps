@@ -172,15 +172,18 @@ check "and switching it off again too" "contributing=no" \
 check "the state lives under the user's config, needing no root" "yes" \
     "$(grep -q 'XDG_CONFIG_HOME' "$TOOL" && echo yes || echo no)"
 
-# The marker alone does nothing: the service exits at once when it is not
-# there, so after an install it is enabled and already dead. Setting the
-# marker without starting the service made the switch in the app write a file
-# and look like it had done something - measured on the phone, the service
-# stayed inactive with contributing=yes.
-check "switching on also starts the service" "yes" \
-    "$(grep -q 'einheit("start")' "$TOOL" && echo yes || echo no)"
-check "and switching off stops it" "yes" \
-    "$(grep -q 'einheit("stop")' "$TOOL" && echo yes || echo no)"
+# The marker alone does nothing: after an installation the service is neither
+# enabled nor running. Setting the marker without starting the service made
+# the switch in the app write a file and look like it had done something -
+# measured on the phone, the service stayed inactive with contributing=yes.
+check "switching on enables and starts the service" "yes" \
+    "$(grep -q 'einheit("enable")' "$TOOL" && grep -q '"--now"' "$TOOL" && echo yes || echo no)"
+check "and switching off disables and stops it" "yes" \
+    "$(grep -q 'einheit("disable")' "$TOOL" && echo yes || echo no)"
+# After an installation everything is off until somebody switches it on -
+# here more than anywhere, because switched on, data leaves the phone.
+check "install.sh does not switch contributing on" "0" \
+    "$(grep -v '^ *#' "$ROOT/install.sh" | grep -c 'enable.*furios-gps-contribute')"
 check "status says whether anything is actually running" "yes" \
     "$(CONTRIB_STATE="$TMP/state" "$TOOL" status | grep -q '^running=' && echo yes || echo no)"
 check "a test run never starts or stops the installed unit" "0" \

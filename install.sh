@@ -33,7 +33,6 @@ sudo install -Dm755 tools/furios-gps-contribute "$BIN/furios-gps-contribute"
 install -Dm644 systemd/furios-gps-contribute.service \
     "$HOME/.config/systemd/user/furios-gps-contribute.service"
 systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable --now furios-gps-contribute.service >/dev/null 2>&1 || true
 
 echo "2) units"
 # The units ship with the package's paths in them; point them at these.
