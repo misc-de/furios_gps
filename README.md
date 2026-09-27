@@ -1,5 +1,12 @@
 # furios_gps
 
+> **Retired 27.9.2026.** geoclue 2.7.1-3+furios7 already discards IP-derived
+> ("fallback") positions and ships the Wi-Fi source on, so this filter only
+> duplicated it - while editing `/etc/geoclue/geoclue.conf`, a conffile of the
+> geoclue package, which meant a question during the next geoclue update.
+> Uninstall with `./uninstall.sh`; settings of your own belong in
+> `/etc/geoclue/conf.d/`.
+
 Stops the FuriPhone FLX1 from reporting a location derived from its IP address.
 
 As shipped, geoclue has its Wi-Fi source switched off, which leaves GeoIP as
