@@ -10,6 +10,10 @@ Description=Let Firefox wait for the GNSS fix
 
 [Service]
 Type=oneshot
+# A oneshot has no start timeout of its own, and this one is wanted by
+# default.target: a hang would hold the session's startup. It only edits
+# prefs files, so 30 s is plenty.
+TimeoutStartSec=30
 ExecStart=/bin/sh -c 'c=%h/.local/bin/furios-gps-firefox; test -x "$$c" || c=/usr/bin/furios-gps-firefox; "$$c" apply'
 
 [Install]
