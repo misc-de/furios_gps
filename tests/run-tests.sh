@@ -30,6 +30,7 @@ run() {
 
 run "contributing back, and not being a burden" bash "$HERE/test-contribute.sh"
 run "Firefox waits for the fix, and leaves the rest alone" bash "$HERE/test-firefox.sh"
+run "uninstall.sh leaves the home as install.sh found it" bash "$HERE/test-uninstall.sh"
 
 is_python() { head -1 "$1" 2>/dev/null | grep -q 'python'; }
 

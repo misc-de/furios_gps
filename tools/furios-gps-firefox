@@ -153,7 +153,16 @@ def take(profile):
     text = read(path)
     rest = without_block(text)
     if rest != text:
-        write(path, rest.rstrip("\n") + "\n" if rest.strip() else "")
+        if rest.strip():
+            write(path, rest.rstrip("\n") + "\n")
+        else:
+            # Nothing but our block was in it, so "on" most likely made the
+            # file. An empty user.js is no setting at all - gone, the profile
+            # is the one a fresh phone has.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     prefs = os.path.join(profile, "prefs.js")
     ptext = read(prefs)
     drop = ours_in_prefs(ptext)

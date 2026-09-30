@@ -117,6 +117,8 @@ ln -s "127.0.0.1:+$OPEN" "$FF/webapp_x/lock"
 check "off: marker gone" "no" "$(st firefox_wait)"
 check "off: no user.js carries the block" "0" "$(st patched)"
 check "off: own pref kept" "1" "$(grep -c 'mine.own' "$FF/a.default/user.js")"
+check "off: a user.js that held only our block is gone, not left empty" "no" \
+    "$([ -e "$TMP/abs/user.js" ] && echo yes || echo no)"
 check "off: web app manager block kept" "1" \
     "$(grep -c 'WEBAPP MANAGED START' "$FF/webapp_x/user.js")"
 check "off: our value removed from a closed profile's prefs.js" "0" \
