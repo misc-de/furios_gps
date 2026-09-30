@@ -75,6 +75,10 @@ MARKER = os.path.join(STATE_DIR, "contribute")     # exists = switched on
 # they run on, the real unit is installed - starting and stopping it from a
 # test run would be the suite reaching into the live system it is testing.
 UNIT = os.environ.get("CONTRIB_UNIT", "furios-gps-contribute.service")
+# Whether the unit was enabled before the first "on" - written then, before
+# anything changes, and read by "off" to put exactly that back. See
+# unit_before_on().
+UNIT_RECORD = os.path.join(STATE_DIR, "unit-before-on")
 QUEUE = os.path.join(STATE_DIR, "queue.jsonl")
 STATS = os.path.join(STATE_DIR, "contribute-stats.json")
 
@@ -487,9 +491,70 @@ def unit_ctl(action):
     started by hand.
     """
     try:
-        subprocess.run(["systemctl", "--user", action, "--now", UNIT],
+        subprocess.run(["systemctl", "--user", action]
+                       + (["--now"] if action in ("enable", "disable") else [])
+                       + [UNIT],
                        capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def unit_state():
+    """"enabled", "disabled", or None when systemd cannot be asked."""
+    try:
+        out = subprocess.run(["systemctl", "--user", "is-enabled", UNIT],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    word = out.stdout.strip()
+    if word in ("enabled", "enabled-runtime", "linked", "linked-runtime",
+                "alias"):
+        return "enabled"
+    if word in ("disabled", "static", "indirect", "masked", "not-found"):
+        return "disabled"
+    if not word and not out.stderr.strip():
+        return "enabled" if out.returncode == 0 else "disabled"
+    return None
+
+
+def unit_before_on():
+    """Write down the unit's state before the first "on" - once.
+
+    Only from a phone that is switched off: a second "on" would otherwise
+    write down our own "enable" as the original. And nothing is written when
+    systemd cannot be asked (an ssh login without a user manager): a guess
+    written down would look like a fact to "off" later.
+    """
+    if os.path.exists(UNIT_RECORD) or os.path.exists(MARKER):
+        return
+    state = unit_state()
+    if state is None:
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(UNIT_RECORD, "w") as fh:
+        fh.write(state + "\n")
+
+
+def unit_back():
+    """"off": the unit as "on" found it. Enabled before - by somebody, for a
+    reason of their own - it stays enabled and is only stopped (without the
+    marker it would exit at once anyway). Without a record, the old way:
+    disabled, and said."""
+    try:
+        with open(UNIT_RECORD) as fh:
+            before = fh.read().strip()
+    except OSError:
+        before = None
+    if before == "enabled":
+        unit_ctl("stop")
+    else:
+        unit_ctl("disable")
+        if before is None:
+            print("no record of the unit before \"on\" (switched on before "
+                  "30.9.2026) - disabled it, as always")
+    try:
+        os.remove(UNIT_RECORD)
+    except OSError:
         pass
 
 
@@ -543,6 +608,7 @@ def main():
         return cmd_status()
     if cmd == "on":
         os.makedirs(STATE_DIR, exist_ok=True)
+        unit_before_on()                # before anything changes
         open(MARKER, "w").close()
         # The marker alone changes nothing: after an installation the service
         # is neither enabled nor running - everything is off until somebody
@@ -557,7 +623,7 @@ def main():
             pass
         # The loop notices the marker is gone and stops by itself within an
         # interval; stopping it now means "off" is true when it says so.
-        unit_ctl("disable")
+        unit_back()
         print("off - nothing further is collected or sent")
         return 0
     if cmd == "once":
