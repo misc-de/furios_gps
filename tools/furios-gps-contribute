@@ -133,15 +133,15 @@ def scan_wifi():
     except (OSError, subprocess.SubprocessError):
         return []
 
-    aps, gesehen = [], set()
-    for zeile in out.splitlines():
+    aps, seen = [], set()
+    for line in out.splitlines():
         # nmcli escapes the colons inside a BSSID as "\:" - unescaping first
         # and splitting after would tear the MAC apart.
-        felder = re.split(r"(?<!\\):", zeile)
-        if len(felder) < 4:
+        fields = re.split(r"(?<!\\):", line)
+        if len(fields) < 4:
             continue
-        mac = felder[0].replace("\\:", ":").strip().upper()
-        ssid = felder[1].replace("\\:", ":")
+        mac = fields[0].replace("\\:", ":").strip().upper()
+        ssid = fields[1].replace("\\:", ":")
         if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac):
             continue
 
@@ -154,18 +154,18 @@ def scan_wifi():
         if re.search(r"(iphone|android.?ap|mobile.?hotspot|galaxy.*hotspot)",
                      ssid, re.IGNORECASE):
             continue
-        if mac in gesehen:
+        if mac in seen:
             continue
-        gesehen.add(mac)
+        seen.add(mac)
 
         ap = {"macAddress": mac}
         try:
-            ap["frequency"] = int(felder[2].split()[0])
+            ap["frequency"] = int(fields[2].split()[0])
         except (ValueError, IndexError):
             pass
         try:
             # nmcli reports 0-100; ichnaea wants dBm. The usual mapping.
-            ap["signalStrength"] = int(round(int(felder[3]) / 2.0 - 100))
+            ap["signalStrength"] = int(round(int(fields[3]) / 2.0 - 100))
         except (ValueError, IndexError):
             pass
         aps.append(ap)
@@ -188,30 +188,30 @@ def gnss_fix(wait_s=45):
 
     mgr = proxy("/org/freedesktop/GeoClue2/Manager",
                 "org.freedesktop.GeoClue2.Manager")
-    pfad = mgr.call_sync("GetClient", None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
-    props = proxy(pfad, "org.freedesktop.DBus.Properties")
+    client_path = mgr.call_sync("GetClient", None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+    props = proxy(client_path, "org.freedesktop.DBus.Properties")
 
-    def setze(name, variant):
+    def set_prop(name, variant):
         props.call_sync("Set", GLib.Variant("(ssv)",
                         ("org.freedesktop.GeoClue2.Client", name, variant)),
                         Gio.DBusCallFlags.NONE, -1, None)
 
-    setze("DesktopId", GLib.Variant("s", "furios-gps-contribute"))
-    setze("RequestedAccuracyLevel", GLib.Variant("u", 8))   # EXACT
+    set_prop("DesktopId", GLib.Variant("s", "furios-gps-contribute"))
+    set_prop("RequestedAccuracyLevel", GLib.Variant("u", 8))   # EXACT
 
-    client = proxy(pfad, "org.freedesktop.GeoClue2.Client")
+    client = proxy(client_path, "org.freedesktop.GeoClue2.Client")
     loop = GLib.MainLoop()
-    ergebnis = {}
+    result = {}
 
     def on_signal(_p, _s, signal, params):
         if signal != "LocationUpdated":
             return
-        ort = params.unpack()[1]
-        lp = proxy(ort, "org.freedesktop.DBus.Properties")
-        werte = lp.call_sync("GetAll", GLib.Variant("(s)",
+        location_path = params.unpack()[1]
+        lp = proxy(location_path, "org.freedesktop.DBus.Properties")
+        values = lp.call_sync("GetAll", GLib.Variant("(s)",
                              ("org.freedesktop.GeoClue2.Location",)),
                              Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
-        ergebnis.update(werte)
+        result.update(values)
         loop.quit()
 
     client.connect("g-signal", on_signal)
@@ -227,35 +227,35 @@ def gnss_fix(wait_s=45):
     except GLib.Error:
         pass
 
-    if not ergebnis:
+    if not result:
         return None
 
-    genauigkeit = float(ergebnis.get("Accuracy", 1e9))
-    hoehe = ergebnis.get("Altitude")
+    accuracy = float(result.get("Accuracy", 1e9))
+    altitude = result.get("Altitude")
     # geoclue reports a missing altitude as -1.8e308, not as absent.
-    hat_hoehe = hoehe is not None and hoehe > -1e300
-    if not hat_hoehe:
+    has_altitude = altitude is not None and altitude > -1e300
+    if not has_altitude:
         log("skipped: no altitude - that is a network fix, not GNSS")
         return None
-    if genauigkeit > ACCURACY_MAX:
-        log(f"skipped: accuracy {genauigkeit:.0f} m is over {ACCURACY_MAX:.0f} m")
+    if accuracy > ACCURACY_MAX:
+        log(f"skipped: accuracy {accuracy:.0f} m is over {ACCURACY_MAX:.0f} m")
         return None
 
     pos = {
-        "latitude": float(ergebnis["Latitude"]),
-        "longitude": float(ergebnis["Longitude"]),
-        "accuracy": genauigkeit,
-        "altitude": float(hoehe),
+        "latitude": float(result["Latitude"]),
+        "longitude": float(result["Longitude"]),
+        "accuracy": accuracy,
+        "altitude": float(altitude),
         "source": "gps",
     }
-    for schluessel, name in (("Speed", "speed"), ("Heading", "heading")):
-        wert = ergebnis.get(schluessel)
-        if wert is not None and wert >= 0:
-            pos[name] = float(wert)
+    for key, name in (("Speed", "speed"), ("Heading", "heading")):
+        value = result.get(key)
+        if value is not None and value >= 0:
+            pos[name] = float(value)
     return pos
 
 
-def entfernung_m(a, b):
+def distance_m(a, b):
     """Rough great-circle distance. Good to a few metres over short spans,
     which is all this is used for."""
     import math
@@ -273,11 +273,11 @@ def queue_append(item):
     os.makedirs(STATE_DIR, exist_ok=True)
     # A queue that grows without end on a phone that is never online is a bug,
     # not patience. The oldest go first - newer observations are worth more.
-    zeilen = queue_read()
-    zeilen.append(item)
-    if len(zeilen) > QUEUE_MAX:
-        zeilen = zeilen[-QUEUE_MAX:]
-    queue_write(zeilen)
+    lines = queue_read()
+    lines.append(item)
+    if len(lines) > QUEUE_MAX:
+        lines = lines[-QUEUE_MAX:]
+    queue_write(lines)
 
 
 def queue_read():
@@ -288,11 +288,11 @@ def queue_read():
         return []
 
 
-def queue_write(zeilen):
+def queue_write(lines):
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = QUEUE + ".tmp"
     with open(tmp, "w") as fh:
-        for z in zeilen:
+        for z in lines:
             fh.write(json.dumps(z) + "\n")
     os.replace(tmp, QUEUE)
 
@@ -312,13 +312,13 @@ def on_wifi():
 
 def submit(items):
     """One request, one batch. Returns True when beaconDB took it."""
-    koerper = json.dumps({"items": items}).encode()
-    req = urllib.request.Request(ENDPOINT, data=koerper, method="POST")
+    body = json.dumps({"items": items}).encode()
+    req = urllib.request.Request(ENDPOINT, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", USER_AGENT)
     try:
-        with urllib.request.urlopen(req, timeout=60) as antwort:
-            return 200 <= antwort.status < 300
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return 200 <= resp.status < 300
     except urllib.error.HTTPError as e:
         # 4xx is us: a malformed report, or being asked to stop. Retrying it
         # unchanged would be exactly the behaviour that earns a block, so the
@@ -336,54 +336,54 @@ def submit(items):
         return False
 
 
-def flush(alles=False):
+def flush(everything=False):
     # "off" means nothing further is sent, and that has to hold here, where
     # sending happens: "off" stops the unit, and the unit's ExecStop is
     # "send" - without this check, switching off handed over the whole queue.
     if not os.path.exists(MARKER):
         log("switched off - the queue is not sent")
         return 0
-    zeilen = queue_read()
-    if not zeilen:
+    lines = queue_read()
+    if not lines:
         return 0
     if not on_wifi():
         log("not on Wi-Fi - the queue keeps")
         return 0
 
-    gesendet = 0
-    versuch = 0
-    while zeilen and (alles or gesendet < BATCH):
-        stapel, rest = zeilen[:BATCH], zeilen[BATCH:]
-        ergebnis = submit(stapel)
-        if ergebnis is None:            # refused, our fault - drop it
-            zeilen = rest
-            queue_write(zeilen)
+    sent = 0
+    attempt = 0
+    while lines and (everything or sent < BATCH):
+        batch, rest = lines[:BATCH], lines[BATCH:]
+        result = submit(batch)
+        if result is None:              # refused, our fault - drop it
+            lines = rest
+            queue_write(lines)
             continue
-        if not ergebnis:
-            wartezeit = BACKOFF_S[min(versuch, len(BACKOFF_S) - 1)]
-            versuch += 1
-            if versuch > len(BACKOFF_S):
+        if not result:
+            delay = BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)]
+            attempt += 1
+            if attempt > len(BACKOFF_S):
                 log("giving up for now - the queue keeps")
                 break
-            log(f"backing off {wartezeit}s")
-            time.sleep(wartezeit)
+            log(f"backing off {delay}s")
+            time.sleep(delay)
             continue
-        gesendet += len(stapel)
-        zeilen = rest
-        queue_write(zeilen)
-        versuch = 0
+        sent += len(batch)
+        lines = rest
+        queue_write(lines)
+        attempt = 0
         s = load_stats()
-        s["submitted"] = s.get("submitted", 0) + len(stapel)
+        s["submitted"] = s.get("submitted", 0) + len(batch)
         s["last_submit"] = int(time.time())
         save_stats(s)
-        if not alles:
+        if not everything:
             break
-    return gesendet
+    return sent
 
 
 # ---------------------------------------------------------------- measure
 
-def gleiche_umgebung(aps, s):
+def same_surroundings(aps, s):
     """Do these access points look like the ones from last time?
 
     A cheap stand-in for "has this phone moved". It exists because the honest
@@ -397,18 +397,18 @@ def gleiche_umgebung(aps, s):
     The networks in range are already scanned by NetworkManager and cost
     nothing extra. When they are the same set, the phone is in the same place.
     """
-    vorher = set(s.get("last_aps") or [])
-    if not vorher:
+    before = set(s.get("last_aps") or [])
+    if not before:
         return False
-    jetzt = {a["macAddress"] for a in aps}
+    now = {a["macAddress"] for a in aps}
     # Overlap rather than equality, so that a neighbour switching their router
     # off does not read as a move. It stays deliberately strict: at 0.8 a set
     # of six survives one network disappearing, but not one disappearing and
     # another appearing, which is already as likely to be a few steps as a
     # flickering signal. Measuring once too often costs a little power;
     # missing a move costs an observation, which is the point of all this.
-    gemeinsam = len(jetzt & vorher) / max(1, len(jetzt | vorher))
-    return gemeinsam >= 0.8
+    overlap = len(now & before) / max(1, len(now | before))
+    return overlap >= 0.8
 
 
 def measure(dry=False):
@@ -423,43 +423,43 @@ def measure(dry=False):
         return None
 
     s = load_stats()
-    letzte = s.get("last_position")
+    last = s.get("last_position")
     # Cheap first: same networks and not long ago means the same place, and
     # there is nothing here a GNSS fix could add.
-    if letzte and not dry:
-        alter = time.time() - letzte[2]
-        if alter < MIN_AGE_S and gleiche_umgebung(aps, s):
-            log(f"skipped: same networks as {alter/60:.0f} min ago - "
+    if last and not dry:
+        age = time.time() - last[2]
+        if age < MIN_AGE_S and same_surroundings(aps, s):
+            log(f"skipped: same networks as {age/60:.0f} min ago - "
                 "not switching the receiver on")
             return None
 
     # Indoors there is never a fix, and looking for one every few minutes is
     # the worst case for the battery: the receiver runs and finds nothing. So
     # a run of failures stretches the wait between attempts.
-    fehl = s.get("gnss_misses", 0)
-    if fehl and not dry:
-        naechster = s.get("gnss_next_try", 0)
-        if time.time() < naechster:
-            log(f"skipped: {fehl} fixes in a row came to nothing, "
-                f"waiting {int((naechster - time.time())/60)} min")
+    misses = s.get("gnss_misses", 0)
+    if misses and not dry:
+        next_try = s.get("gnss_next_try", 0)
+        if time.time() < next_try:
+            log(f"skipped: {misses} fixes in a row came to nothing, "
+                f"waiting {int((next_try - time.time())/60)} min")
             return None
 
     pos = gnss_fix()
     if pos is None:
-        s["gnss_misses"] = fehl + 1
+        s["gnss_misses"] = misses + 1
         # 3, 6, 12 ... up to an hour between attempts.
-        wartezeit = min(3600, INTERVAL_S * (2 ** min(fehl, 5)))
-        s["gnss_next_try"] = time.time() + wartezeit
+        delay = min(3600, INTERVAL_S * (2 ** min(misses, 5)))
+        s["gnss_next_try"] = time.time() + delay
         save_stats(s)
         return None
     s["gnss_misses"] = 0
     s.pop("gnss_next_try", None)
 
-    if letzte:
-        weg = entfernung_m((letzte[0], letzte[1]), (pos["latitude"], pos["longitude"]))
-        alter = time.time() - letzte[2]
-        if weg < MIN_MOVE_M and alter < MIN_AGE_S:
-            log(f"skipped: {weg:.0f} m from the last one, {alter/60:.0f} min ago")
+    if last:
+        moved = distance_m((last[0], last[1]), (pos["latitude"], pos["longitude"]))
+        age = time.time() - last[2]
+        if moved < MIN_MOVE_M and age < MIN_AGE_S:
+            log(f"skipped: {moved:.0f} m from the last one, {age/60:.0f} min ago")
             return None
 
     item = {"timestamp": int(time.time() * 1000),
@@ -479,7 +479,7 @@ def measure(dry=False):
 
 # ---------------------------------------------------------------- commands
 
-def einheit(was):
+def unit_ctl(action):
     """Switch our own user service on or off, if there is one.
 
     Never fatal: run from a checkout, or on a system where the unit was not
@@ -487,32 +487,32 @@ def einheit(was):
     started by hand.
     """
     try:
-        subprocess.run(["systemctl", "--user", was, "--now", UNIT],
+        subprocess.run(["systemctl", "--user", action, "--now", UNIT],
                        capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
 
 
 def cmd_status():
-    an = os.path.exists(MARKER)
+    on = os.path.exists(MARKER)
     s = load_stats()
-    warteschlange = len(queue_read())
-    print(f"contributing={'yes' if an else 'no'}")
+    queued = len(queue_read())
+    print(f"contributing={'yes' if on else 'no'}")
     # Two different facts, and the app shows the difference: the marker says
     # what was asked for, the service says whether anything is happening.
     try:
-        laeuft = subprocess.run(["systemctl", "--user", "is-active", UNIT],
-                                capture_output=True, text=True,
-                                timeout=15).stdout.strip() == "active"
+        running = subprocess.run(["systemctl", "--user", "is-active", UNIT],
+                                 capture_output=True, text=True,
+                                 timeout=15).stdout.strip() == "active"
     except (OSError, subprocess.SubprocessError):
-        laeuft = False
-    print(f"running={'yes' if laeuft else 'no'}")
-    print(f"queued={warteschlange}")
+        running = False
+    print(f"running={'yes' if running else 'no'}")
+    print(f"queued={queued}")
     print(f"collected={s.get('collected', 0)}")
     print(f"submitted={s.get('submitted', 0)}")
-    letzte = s.get("last_submit")
-    print("last_submit=" + (time.strftime("%Y-%m-%d %H:%M", time.localtime(letzte))
-                            if letzte else "never"))
+    last = s.get("last_submit")
+    print("last_submit=" + (time.strftime("%Y-%m-%d %H:%M", time.localtime(last))
+                            if last else "never"))
     print(f"endpoint={ENDPOINT}")
     print()
     print("Sent only over Wi-Fi, only from a GNSS fix, and never networks that")
@@ -538,35 +538,35 @@ def cmd_run():
 
 
 def main():
-    befehl = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if befehl == "status":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "status":
         return cmd_status()
-    if befehl == "on":
+    if cmd == "on":
         os.makedirs(STATE_DIR, exist_ok=True)
         open(MARKER, "w").close()
         # The marker alone changes nothing: after an installation the service
         # is neither enabled nor running - everything is off until somebody
         # switches it on. enable --now starts it and keeps it across logins.
-        einheit("enable")
+        unit_ctl("enable")
         print("on - collecting")
         return 0
-    if befehl == "off":
+    if cmd == "off":
         try:
             os.remove(MARKER)
         except OSError:
             pass
         # The loop notices the marker is gone and stops by itself within an
         # interval; stopping it now means "off" is true when it says so.
-        einheit("disable")
+        unit_ctl("disable")
         print("off - nothing further is collected or sent")
         return 0
-    if befehl == "once":
+    if cmd == "once":
         return 0 if measure(dry="--dry-run" in sys.argv) else 1
-    if befehl == "send":
-        n = flush(alles=True)
+    if cmd == "send":
+        n = flush(everything=True)
         print(f"submitted {n}")
         return 0
-    if befehl == "run":
+    if cmd == "run":
         return cmd_run()
     print("usage: furios-gps-contribute [status|on|off|once [--dry-run]|send|run]",
           file=sys.stderr)

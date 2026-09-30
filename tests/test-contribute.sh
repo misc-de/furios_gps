@@ -70,7 +70,7 @@ cases = [
     ("Cafe_optout",       True,  "_optout"),
     ("iPhone of Anna",    True,  "a phone hotspot"),
     ("Android AP 42",     True,  "a phone hotspot"),
-    ("Stadtbuecherei",    False, "an ordinary network"),
+    ("City Library",      False, "an ordinary network"),
     ("nomap_cafe",        False, "_nomap only counts at the end"),
 ]
 bad = 0
@@ -146,7 +146,7 @@ sent = []
 m.submit = lambda items: sent.append(items) or True
 m.on_wifi = lambda: True
 m.queue_write([{"n": i} for i in range(3)])
-m.flush(alles=True)
+m.flush(everything=True)
 sys.exit(0 if sent == [] and len(m.queue_read()) == 3 else 1)
 PYEOF
 check "switched off, a send sends nothing" "0" "$?"
@@ -177,9 +177,9 @@ check "the state lives under the user's config, needing no root" "yes" \
 # the switch in the app write a file and look like it had done something -
 # measured on the phone, the service stayed inactive with contributing=yes.
 check "switching on enables and starts the service" "yes" \
-    "$(grep -q 'einheit("enable")' "$TOOL" && grep -q '"--now"' "$TOOL" && echo yes || echo no)"
+    "$(grep -q 'unit_ctl("enable")' "$TOOL" && grep -q '"--now"' "$TOOL" && echo yes || echo no)"
 check "and switching off disables and stops it" "yes" \
-    "$(grep -q 'einheit("disable")' "$TOOL" && echo yes || echo no)"
+    "$(grep -q 'unit_ctl("disable")' "$TOOL" && echo yes || echo no)"
 # After an installation everything is off until somebody switches it on -
 # here more than anywhere, because switched on, data leaves the phone.
 check "install.sh does not switch contributing on" "0" \
@@ -201,7 +201,7 @@ check "a missing unit is not fatal" "0" \
 # switched on.
 printf '\n\033[1m  what it costs while running\033[0m\n'
 check "the cheap checks come before the receiver" "yes" \
-    "$(awk '/def measure/,/pos = gnss_fix/' "$TOOL" | grep -q 'gleiche_umgebung' && echo yes || echo no)"
+    "$(awk '/def measure/,/pos = gnss_fix/' "$TOOL" | grep -q 'same_surroundings' && echo yes || echo no)"
 check "standing still never switches it on" "yes" \
     "$(grep -q 'not switching the receiver on' "$TOOL" && echo yes || echo no)"
 check "and indoors it stops trying every few minutes" "yes" \
@@ -215,11 +215,11 @@ ld.exec_module(m)
 aps = [{"macAddress": f"AA:BB:CC:DD:EE:{i:02X}"} for i in range(6)]
 m.save_stats({"last_position": [50.0, 8.0, time.time()],
               "last_aps": [a["macAddress"] for a in aps]})
-gerufen = {"n": 0}
-m.gnss_fix = lambda *a, **k: gerufen.update(n=gerufen["n"] + 1) or None
+calls = {"n": 0}
+m.gnss_fix = lambda *a, **k: calls.update(n=calls["n"] + 1) or None
 m.scan_wifi = lambda: aps
 m.measure()
-sys.exit(0 if gerufen["n"] == 0 else 1)
+sys.exit(0 if calls["n"] == 0 else 1)
 PYEOF
 check "proved: same place, receiver untouched" "0" "$?"
 

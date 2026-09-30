@@ -1,6 +1,6 @@
-# Byte-Code der Testlaeufe
+# Byte code from test runs
 __pycache__/
 *.pyc
 
-# Gebaute Pakete
+# Built packages
 *.deb

@@ -21,7 +21,7 @@ print(f"Client: {path}")
 
 props = proxy(path, "org.freedesktop.DBus.Properties")
 props.call_sync("Set", GLib.Variant("(ssv)", ("org.freedesktop.GeoClue2.Client",
-                "DesktopId", GLib.Variant("s", "gpsctl-messung"))),
+                "DesktopId", GLib.Variant("s", "gpsctl-measurement"))),
                 Gio.DBusCallFlags.NONE, -1, None)
 props.call_sync("Set", GLib.Variant("(ssv)", ("org.freedesktop.GeoClue2.Client",
                 "RequestedAccuracyLevel", GLib.Variant("u", 8))),
@@ -60,5 +60,5 @@ try:
 except GLib.Error:
     pass
 if not state["done"]:
-    print(f"KEINE Position nach {WAIT}s")
+    print(f"NO position after {WAIT}s")
     sys.exit(2)

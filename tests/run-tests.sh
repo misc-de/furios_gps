@@ -76,14 +76,14 @@ else
         [ -f "$u" ] || continue
         # A user unit checked as a system one is checked against the wrong
         # world: its targets do not exist there.
-        modus=""
+        mode=""
         grep -q 'WantedBy=default.target\|PartOf=graphical-session.target' "$u" \
-            && modus="--user"
+            && mode="--user"
         # shellcheck disable=SC2086
-        if systemd-analyze verify $modus "$u" 2>&1 | grep -vE "$noise" | grep -q .; then
+        if systemd-analyze verify $mode "$u" 2>&1 | grep -vE "$noise" | grep -q .; then
             printf '  \033[31mFAIL\033[0m %s\n' "$(basename "$u")"
             # shellcheck disable=SC2086
-            systemd-analyze verify $modus "$u" 2>&1 | grep -vE "$noise" | sed 's/^/       /'
+            systemd-analyze verify $mode "$u" 2>&1 | grep -vE "$noise" | sed 's/^/       /'
             FAILED=$((FAILED + 1))
         else
             printf '  \033[32mok\033[0m   %s\n' "$(basename "$u")"

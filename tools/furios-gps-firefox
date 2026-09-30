@@ -177,12 +177,12 @@ def units(verb):
 
 def cmd_apply():
     """What the units run: bring every profile in line with the marker."""
-    alle = profiles()
+    all_profiles = profiles()
     if os.path.exists(MARKER):
-        changed = sum(put(p) for p in alle)
-        print(f"on - {changed} profile(s) updated, {len(alle)} in all")
+        changed = sum(put(p) for p in all_profiles)
+        print(f"on - {changed} profile(s) updated, {len(all_profiles)} in all")
         return 0
-    left = sum(not take(p) for p in alle)
+    left = sum(not take(p) for p in all_profiles)
     if left:
         print(f"off - {left} profile(s) open, cleaned up at the next login")
         return 0
@@ -193,14 +193,14 @@ def cmd_apply():
 
 
 def cmd_status():
-    alle = profiles()
-    an = os.path.exists(MARKER)
-    mit = sum(has_block(p) for p in alle)
+    all_profiles = profiles()
+    on = os.path.exists(MARKER)
+    patched = sum(has_block(p) for p in all_profiles)
     rest = sum(bool(ours_in_prefs(read(os.path.join(p, "prefs.js"))))
-               for p in alle if not has_block(p))
-    print(f"firefox_wait={'yes' if an else 'no'}")
-    print(f"profiles={len(alle)}")
-    print(f"patched={mit}")
+               for p in all_profiles if not has_block(p))
+    print(f"firefox_wait={'yes' if on else 'no'}")
+    print(f"profiles={len(all_profiles)}")
+    print(f"patched={patched}")
     print(f"leftover={rest}")
     print()
     print("Firefox and its web apps wait up to 3 minutes for the satellite fix")
@@ -209,12 +209,12 @@ def cmd_status():
 
 
 def main():
-    befehl = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if befehl == "status":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "status":
         return cmd_status()
-    if befehl == "apply":
+    if cmd == "apply":
         return cmd_apply()
-    if befehl == "on":
+    if cmd == "on":
         os.makedirs(STATE_DIR, exist_ok=True)
         open(MARKER, "w").close()
         cmd_apply()
@@ -222,7 +222,7 @@ def main():
         units("enable")
         print("Restart an open web app for it to take effect.")
         return 0
-    if befehl == "off":
+    if cmd == "off":
         try:
             os.remove(MARKER)
         except OSError:
