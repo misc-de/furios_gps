@@ -8,16 +8,20 @@ set -e
 cd "$(dirname "$0")"
 
 BIN=$HOME/.local/bin
+UNITS=$HOME/.config/systemd/user
+# The install record: what each path held before the first install, so that
+# uninstall.sh puts exactly that back rather than assuming there was nothing.
+# Beside the tools' own state, which uninstall.sh removes after using it.
+REC_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/furios-gps/install-record
+. ./install-record.sh
 
 echo "1) program"
-install -Dm755 tools/furios-gps-contribute "$BIN/furios-gps-contribute"
-install -Dm755 tools/furios-gps-firefox "$BIN/furios-gps-firefox"
+rec_install 755 tools/furios-gps-contribute "$BIN/furios-gps-contribute" furios-gps
+rec_install 755 tools/furios-gps-firefox "$BIN/furios-gps-firefox" furios-gps
 
 echo "2) user unit"
-install -Dm644 systemd/furios-gps-contribute.service \
-    "$HOME/.config/systemd/user/furios-gps-contribute.service"
-for u in furios-gps-firefox.service furios-gps-firefox.path; do
-    install -Dm644 "systemd/$u" "$HOME/.config/systemd/user/$u"
+for u in furios-gps-contribute.service furios-gps-firefox.service furios-gps-firefox.path; do
+    rec_install 644 "systemd/$u" "$UNITS/$u" furios-gps
 done
 systemctl --user daemon-reload 2>/dev/null || true
 # A running service gets the new code; a stopped one stays stopped.

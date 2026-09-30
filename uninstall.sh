@@ -34,11 +34,29 @@ systemctl --user disable --now furios-gps-firefox.path furios-gps-firefox.servic
 # default.target.wants is a unit that comes back with the next install.
 for u in furios-gps-contribute.service furios-gps-firefox.service \
          furios-gps-firefox.path; do
-    rm -f "$USER_UNITS/$u" "$USER_UNITS"/*.wants/"$u"
+    rm -f "$USER_UNITS"/*.wants/"$u"
 done
-rm -f "$HOME/.local/bin/furios-gps-contribute" \
-      "$HOME/.local/bin/furios-gps-firefox" \
-      "$HOME"/.local/bin/__pycache__/furios-gps-contributecpython-*.pyc \
+# The installed files go back to what install.sh found before its first run,
+# from the record it wrote then (install-record.sh explains the format): gone
+# where nothing was, the earlier file where there was one, and left alone
+# where somebody changed ours since. Without a record - an install from
+# before 30.9.2026 - they are removed by name, as uninstall.sh always did,
+# and it says so rather than pretending to know.
+REC_DIR=$STATE_DIR/install-record
+. ./install-record.sh
+if rec_exists; then
+    rec_restore
+else
+    echo "No install record (installed before 30.9.2026): removing the files"
+    echo "by name - what was at those paths before cannot be known."
+    for u in furios-gps-contribute.service furios-gps-firefox.service \
+             furios-gps-firefox.path; do
+        rm -f "$USER_UNITS/$u"
+    done
+    rm -f "$HOME/.local/bin/furios-gps-contribute" \
+          "$HOME/.local/bin/furios-gps-firefox"
+fi
+rm -f "$HOME"/.local/bin/__pycache__/furios-gps-contributecpython-*.pyc \
       "$HOME"/.local/bin/__pycache__/furios-gps-firefoxcpython-*.pyc
 rmdir "$HOME/.local/bin/__pycache__" 2>/dev/null || true
 systemctl --user daemon-reload 2>/dev/null || true
@@ -47,7 +65,14 @@ systemctl --user daemon-reload 2>/dev/null || true
 # never sent (it is not sent now either - uninstalling is not consenting),
 # the counters, and the temporary siblings of all of them. A reinstall starts
 # at zero, switched off, the way it does on a new phone.
-rm -rf "$STATE_DIR"
+# The install record goes with it - unless rec_restore kept it because a file
+# that was there before our install could not be put back; then it stays,
+# and rec_restore has said where.
+if [ -d "$REC_DIR" ]; then
+    find "$STATE_DIR" -mindepth 1 -maxdepth 1 ! -name install-record -exec rm -rf {} +
+else
+    rm -rf "$STATE_DIR"
+fi
 # user.js and prefs.js are written through a temporary file beside them; one
 # left by an interrupted write is ours.
 rm -f "$HOME"/.mozilla/firefox/*/*.furios-gps.tmp
@@ -77,6 +102,12 @@ if [ -n "$found" ]; then
     if grep -qF "$PROXY_URL" "$GEOCLUE_CONF" 2>/dev/null; then
         url=$(sed -n 's/^url=//p' /etc/furios-gps-fix.shipped 2>/dev/null | head -1)
         enable=$(sed -n 's/^enable=//p' /etc/furios-gps-fix.shipped 2>/dev/null | head -1)
+        # gpsctl's record is the only source that knows; without it these are
+        # geoclue 2.7.1's shipped values - a fallback, and said as one.
+        if [ -z "$url" ] || [ -z "$enable" ]; then
+            echo "No record of geoclue.conf before the filter (/etc/furios-gps-fix.shipped):"
+            echo "putting back what geoclue 2.7.1 ships for the keys that are missing."
+        fi
         url=${url:-https://api.beacondb.net/v1/geolocate}
         enable=${enable:-false}
         sudo sed -i "/^\[wifi\]/,/^\[/{s|^url=${PROXY_URL}\$|url=${url}|;s|^enable=true\$|enable=${enable}|}" \
