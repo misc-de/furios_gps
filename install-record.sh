@@ -35,6 +35,11 @@
 
 REC_SUDO=${REC_SUDO:-}
 
+# A command, through $REC_SUDO when it is set.
+_rec_run() {
+    if [ -n "$REC_SUDO" ]; then "$REC_SUDO" "$@"; else "$@"; fi
+}
+
 _rec_manifest() { printf '%s/manifest' "$REC_DIR"; }
 
 # The line for one path, or nothing.
@@ -73,7 +78,9 @@ rec_before() {
     [ -n "$(_rec_line "$path")" ] && return 0      # the first note stands
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
         orig=absent
-    elif grep -qF -- "$mark" "$path" 2>/dev/null; then
+    # -a and the C locale: a shared object is binary, and grep in a UTF-8
+    # locale finds nothing in it.
+    elif LC_ALL=C grep -aqF -- "$mark" "$path" 2>/dev/null; then
         orig=unknown
     else
         orig=saved
@@ -96,7 +103,7 @@ rec_after() {
 # rec_install <mode> <src> <dst> <mark> - the common case in one call.
 rec_install() {
     rec_before "$3" "$4"
-    $REC_SUDO install -Dm"$1" "$2" "$3"
+    _rec_run install -Dm"$1" "$2" "$3"
     rec_after "$3"
 }
 
@@ -142,10 +149,10 @@ rec_restore() {
             continue
         fi
         case $orig in
-            absent)  $REC_SUDO rm -f "$path" ;;
-            unknown) $REC_SUDO rm -f "$path"
+            absent)  _rec_run rm -f "$path" ;;
+            unknown) _rec_run rm -f "$path"
                      echo "removed $path: installed before install records existed, so what was there before is not known" ;;
-            saved)   $REC_SUDO cp -p "$REC_DIR/saved/$(_rec_key "$path")" "$path"
+            saved)   _rec_run cp -p "$REC_DIR/saved/$(_rec_key "$path")" "$path"
                      echo "put back $path as it was before the install" ;;
         esac
     done < <(tac "$m")
