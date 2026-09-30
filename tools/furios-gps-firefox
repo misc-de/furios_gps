@@ -28,8 +28,28 @@ runs, so the values stay in prefs.js until they are removed there too - which
 can only happen while that profile is closed, because Firefox writes prefs.js
 on exit. A profile that is open during "off" is cleaned up at the next login;
 until then status says how many are left.
+
+What was there before "on" is written down before the first change, in
+firefox-record.json beside the marker, and "off" goes back to exactly that
+rather than to what a new phone probably has:
+
+  * per profile, whether user.js existed at all (off removes a user.js only
+    if "on" made it, and leaves an empty one that was there), and how it
+    ended - "on" and "off" rewrite its last line;
+  * per profile, which of our three lines were in prefs.js already - a value
+    somebody set in about:config that happens to be ours looks exactly like
+    ours in prefs.js, and only the record can tell them apart;
+  * whether the two units were enabled - "off" disables only what "on"
+    enabled.
+
+A profile that already carried the prefs when it was first seen (an "on"
+from before 30.9.2026, or the block written by hand on 27.9.) has no record:
+what it looked like before cannot be known, "off" does what it always did
+and says so. A record is only ever added to, never rewritten, and an entry
+goes once "off" has put its profile back.
 """
 import configparser
+import json
 import os
 import re
 import subprocess
@@ -53,6 +73,7 @@ STATE_DIR = os.environ.get(
     os.path.join(os.environ.get("XDG_CONFIG_HOME",
                                 os.path.expanduser("~/.config")), "furios-gps"))
 MARKER = os.path.join(STATE_DIR, "firefox-wait")    # exists = switched on
+RECORD = os.path.join(STATE_DIR, "firefox-record.json")  # before "on" - see above
 # Overridable for the same reason as in furios-gps-contribute: the tests must
 # not enable or disable the units installed on the phone they run on.
 UNITS = os.environ.get("FIREFOX_UNITS",
@@ -117,6 +138,51 @@ def write(path, text):
     os.replace(tmp, path)
 
 
+def load_record():
+    try:
+        with open(RECORD, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def save_record(rec):
+    """Written whole, and gone when there is nothing left to remember - an
+    empty record is not a state the phone had before."""
+    if not rec.get("profiles") and not rec.get("units"):
+        try:
+            os.remove(RECORD)
+        except OSError:
+            pass
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = RECORD + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1, sort_keys=True)
+    os.replace(tmp, RECORD)
+
+
+def remember(profile, rec):
+    """The profile as "on" first finds it. Never overwritten: the second "on"
+    would otherwise write down our own change as the original."""
+    profiles = rec.setdefault("profiles", {})
+    if profile in profiles:
+        return
+    path = os.path.join(profile, "user.js")
+    if has_block(profile):
+        # Ours already, from before records existed. What was there before
+        # that is not known - no guess is written down as a fact.
+        profiles[profile] = None
+        return
+    text = read(path)
+    profiles[profile] = {
+        "user_js": "present" if os.path.exists(path) else "absent",
+        "tail": text[len(text.rstrip("\n")):],
+        "prefs": ours_in_prefs(read(os.path.join(profile, "prefs.js"))),
+    }
+
+
 def without_block(text):
     return LEGACY_RE.sub("", BLOCK_RE.sub("", text))
 
@@ -135,7 +201,10 @@ def ours_in_prefs(text):
     return [z for z in text.splitlines() if z.strip() in want]
 
 
-def put(profile):
+def put(profile, rec=None):
+    if rec is not None:
+        remember(profile, rec)
+        save_record(rec)            # before the write, not after it
     path = os.path.join(profile, "user.js")
     text = read(path)
     rest = without_block(text)
@@ -146,26 +215,45 @@ def put(profile):
     return False
 
 
-def take(profile):
-    """Block out of user.js, our values out of prefs.js. Returns False when
-    prefs.js could not be cleaned because the profile is open."""
+def droppable(profile, rec, ptext=None):
+    """Our lines in prefs.js that "off" takes out. A line that was there
+    before "on" is somebody's about:config value that happens to equal ours -
+    theirs, and it stays."""
+    before = (rec or {}).get("profiles", {}).get(profile)
+    if ptext is None:
+        ptext = read(os.path.join(profile, "prefs.js"))
+    theirs = set(before["prefs"]) if before else set()
+    return [z for z in ours_in_prefs(ptext) if z.strip() not in theirs]
+
+
+def take(profile, rec=None):
+    """Block out of user.js, our values out of prefs.js - back to what the
+    record says the profile was before "on". Returns False when prefs.js
+    could not be cleaned because the profile is open."""
+    before = (rec or {}).get("profiles", {}).get(profile)
     path = os.path.join(profile, "user.js")
     text = read(path)
     rest = without_block(text)
     if rest != text:
         if rest.strip():
-            write(path, rest.rstrip("\n") + "\n")
+            # Its own ending back, as far as the record knows it.
+            tail = before["tail"] if before else "\n"
+            write(path, rest.rstrip("\n") + tail)
+        elif before and before["user_js"] == "present":
+            # It was there before "on", empty or all but empty: it stays.
+            write(path, before["tail"])
         else:
-            # Nothing but our block was in it, so "on" most likely made the
-            # file. An empty user.js is no setting at all - gone, the profile
-            # is the one a fresh phone has.
+            # "on" made it (the record says so), or there is no record and
+            # it held nothing but our block, so "on" most likely made it. An
+            # empty user.js is no setting at all - gone, the profile is the
+            # one a fresh phone has.
             try:
                 os.remove(path)
             except OSError:
                 pass
     prefs = os.path.join(profile, "prefs.js")
     ptext = read(prefs)
-    drop = ours_in_prefs(ptext)
+    drop = droppable(profile, rec, ptext)
     if not drop:
         return True
     if in_use(profile):
@@ -176,9 +264,31 @@ def take(profile):
     return True
 
 
-def units(verb):
+def unit_state(unit):
+    """"enabled", "disabled", or None when systemd cannot be asked."""
     try:
-        subprocess.run(["systemctl", "--user", verb, *UNITS],
+        out = subprocess.run(["systemctl", "--user", "is-enabled", unit],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    word = out.stdout.strip()
+    if word in ("enabled", "enabled-runtime", "linked", "linked-runtime",
+                "alias"):
+        return "enabled"
+    if word in ("disabled", "static", "indirect", "masked", "not-found"):
+        return "disabled"
+    if not word and not out.stderr.strip():
+        return "enabled" if out.returncode == 0 else "disabled"
+    return None
+
+
+def units(verb):
+    subprocess_units(verb, UNITS)
+
+
+def subprocess_units(verb, which):
+    try:
+        subprocess.run(["systemctl", "--user", verb, *which],
                        capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -187,16 +297,40 @@ def units(verb):
 def cmd_apply():
     """What the units run: bring every profile in line with the marker."""
     all_profiles = profiles()
+    rec = load_record()
     if os.path.exists(MARKER):
-        changed = sum(put(p) for p in all_profiles)
+        changed = sum(put(p, rec) for p in all_profiles)
         print(f"on - {changed} profile(s) updated, {len(all_profiles)} in all")
         return 0
-    left = sum(not take(p) for p in all_profiles)
+    known = rec.get("profiles", {})
+    guessed = sum(1 for p in all_profiles if p in known and known[p] is None
+                  or p not in known and has_block(p))
+    left = 0
+    for p in all_profiles:
+        if take(p, rec):
+            known.pop(p, None)
+        else:
+            left += 1
+    if guessed:
+        print(f"{guessed} profile(s) had the prefs from before records existed "
+              "(30.9.2026) - cleaned as always, what they had before is not known")
     if left:
+        save_record(rec)
         print(f"off - {left} profile(s) open, cleaned up at the next login")
         return 0
-    # Nothing left anywhere: the units have no more work and step aside.
-    units("disable")
+    # Nothing left anywhere: the units have no more work and go back to the
+    # state "on" found them in. The profiles' record is spent; one for a
+    # profile that is no longer in profiles.ini has nothing left to restore.
+    rec.pop("profiles", None)
+    before = rec.pop("units", None)
+    if before is None:
+        units("disable")
+        print("no record of the units before \"on\" - disabled, as always")
+    else:
+        off = [u for u in UNITS if before.get(u) != "enabled"]
+        if off:
+            subprocess_units("disable", off)
+    save_record(rec)
     print("off - no profile carries the prefs")
     return 0
 
@@ -205,8 +339,8 @@ def cmd_status():
     all_profiles = profiles()
     on = os.path.exists(MARKER)
     patched = sum(has_block(p) for p in all_profiles)
-    rest = sum(bool(ours_in_prefs(read(os.path.join(p, "prefs.js"))))
-               for p in all_profiles if not has_block(p))
+    rec = load_record()
+    rest = sum(bool(droppable(p, rec)) for p in all_profiles if not has_block(p))
     print(f"firefox_wait={'yes' if on else 'no'}")
     print(f"profiles={len(all_profiles)}")
     print(f"patched={patched}")
@@ -225,6 +359,27 @@ def main():
         return cmd_apply()
     if cmd == "on":
         os.makedirs(STATE_DIR, exist_ok=True)
+        # The units' state before the first "on", while it is still the
+        # original one. Not written when systemd cannot say: "off" then
+        # falls back to disabling, and says so.
+        rec = load_record()
+        # Only from a phone this tool has not touched yet. Switched on
+        # already, or a profile still carrying the block, means the units'
+        # state is ours from an earlier "on" and no longer the original. So
+        # does an enabled unit next to our values in a prefs.js: that is an
+        # "off" from before 30.9.2026 still waiting for an open profile to
+        # close - the same lines without enabled units are somebody's own
+        # about:config values, and those say nothing about the units.
+        all_profiles = profiles()
+        states = {u: unit_state(u) for u in UNITS}
+        pending = "enabled" in states.values() and any(
+            ours_in_prefs(read(os.path.join(p, "prefs.js"))) for p in all_profiles)
+        untouched = (not os.path.exists(MARKER) and not pending
+                     and not any(has_block(p) for p in all_profiles))
+        if "units" not in rec and untouched:
+            if None not in states.values():
+                rec["units"] = states
+                save_record(rec)
         open(MARKER, "w").close()
         cmd_apply()
         # The path unit catches profiles made later, the service the login.
