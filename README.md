@@ -70,6 +70,28 @@ not do this; run `furios-gps-firefox off` first.
 
 Or the switch under **Firefox and web apps** on the GPS page of the app.
 
+## What it remembers, and where
+
+Everything this project changes is written down BEFORE the first change, so
+that switching off and uninstalling put back what was there - not what a new
+phone probably has. All of it lives in `~/.config/furios-gps/`:
+
+| File | Written by | What it records | Read by |
+|---|---|---|---|
+| `install-record/manifest` (+ `saved/`) | `install.sh`, first run | for each installed file: nothing there / somebody else's file (a copy in `saved/`) / ours from an install before records existed; and the checksum of what was installed | `uninstall.sh` |
+| `unit-before-on` | `furios-gps-contribute on`, first time | whether `furios-gps-contribute.service` was enabled | `furios-gps-contribute off` |
+| `firefox-record.json` | `furios-gps-firefox on`, per profile the first time it is seen | whether `user.js` existed and how it ended, which of our lines were already in `prefs.js` (your own `about:config` values), whether the two units were enabled | `furios-gps-firefox off` / `apply` |
+
+A record is never rewritten by a second install or a second `on`. Restoring
+puts back only what is still ours: a file or a value somebody changed after
+us stays as it is, and `uninstall.sh` or `off` says so. Where there is no
+record - installed or switched on before 30.9.2026 - both fall back to what
+they did before (remove, disable) and say that they had none.
+
+One deliberate exception: the Firefox block written by hand on 27.9.2026,
+before `furios-gps-firefox` existed, is taken over as ours, and `off` removes
+it like its own.
+
 ## Tests
 
     ./tests/run-tests.sh        # not with sudo
