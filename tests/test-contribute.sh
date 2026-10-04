@@ -152,6 +152,27 @@ PYEOF
 check "switched off, a send sends nothing" "0" "$?"
 check "nothing is sent over mobile data" "yes" \
     "$(grep -q 'def on_wifi' "$TOOL" && echo yes || echo no)"
+# nmcli with NetworkManager's German catalogue says "verbunden", even with -t
+# (4.10.2026: pactl did the same to audioctl). Wi-Fi has to be recognised in
+# any language, or a German phone never submits anything.
+cat > "$TMP/bin/nmcli" <<'STUB'
+#!/bin/sh
+case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
+C|C.*|POSIX) echo "wifi:connected" ;;
+*)           echo "wifi:verbunden" ;;
+esac
+STUB
+chmod +x "$TMP/bin/nmcli"
+LC_ALL=de_DE.UTF-8 py <<'PYEOF'
+import importlib.machinery, importlib.util, os, sys, tempfile
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+sys.exit(0 if m.on_wifi() else 1)
+PYEOF
+check "Wi-Fi is recognised on a phone set to German" "0" "$?"
+rm -f "$TMP/bin/nmcli"
 check "the queue cannot grow without end" "yes" \
     "$(grep -q 'QUEUE_MAX' "$TOOL" && echo yes || echo no)"
 

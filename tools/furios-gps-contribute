@@ -133,7 +133,7 @@ def scan_wifi():
     try:
         out = subprocess.run(
             ["nmcli", "-t", "-f", "BSSID,SSID,FREQ,SIGNAL", "device", "wifi", "list"],
-            capture_output=True, text=True, timeout=30).stdout
+            capture_output=True, text=True, timeout=30, env=NMCLI_ENV).stdout
     except (OSError, subprocess.SubprocessError):
         return []
 
@@ -303,12 +303,20 @@ def queue_write(lines):
 
 # ---------------------------------------------------------------- submit
 
+# nmcli translates its values even with -t: on a system with NetworkManager's
+# German catalogue the state is "verbunden", "wifi:connected" never matches
+# and nothing is ever submitted. FuriOS ships without that catalogue today;
+# pactl's is there and broke audioctl exactly this way (4.10.2026).
+NMCLI_ENV = dict(os.environ, LC_ALL="C.UTF-8")
+
+
 def on_wifi():
     """Only submit over Wi-Fi. Somebody who turned this on did not agree to
     spend their mobile data allowance on it."""
     try:
         out = subprocess.run(["nmcli", "-t", "-f", "TYPE,STATE", "device", "status"],
-                             capture_output=True, text=True, timeout=15).stdout
+                             capture_output=True, text=True, timeout=15,
+                             env=NMCLI_ENV).stdout
     except (OSError, subprocess.SubprocessError):
         return False
     return any(z.startswith("wifi:connected") for z in out.splitlines())
