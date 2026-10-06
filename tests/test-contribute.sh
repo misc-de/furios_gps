@@ -83,6 +83,30 @@ for ssid, expected, what in cases:
 sys.exit(1 if bad else 0)
 PY
 check "every exclusion rule holds" "0" "$?"
+# A hotspot called anything at all slips past the name rules. Its address
+# gives it away: phones make one up, with the locally administered bit (0x02
+# in the first octet) set. Run through scan_wifi with an nmcli of our own.
+cat > "$TMP/bin/nmcli" <<'NMCLI'
+#!/bin/sh
+cat <<'OUT'
+00\:11\:22\:33\:44\:55:City Library:2412 MHz:70
+02\:11\:22\:33\:44\:55:Anna's Pixel:2437 MHz:80
+DA\:A1\:19\:00\:00\:01:FRITZ!Box 7590:5180 MHz:60
+A4\:B1\:C1\:00\:00\:01:Cafe:5180 MHz:60
+OUT
+NMCLI
+chmod +x "$TMP/bin/nmcli"
+check "a made-up (locally administered) BSSID is dropped, whatever its name" \
+    "00:11:22:33:44:55 A4:B1:C1:00:00:01" \
+    "$(py <<'PYEOF'
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+print(" ".join(a["macAddress"] for a in m.scan_wifi()))
+PYEOF
+)"
+rm -f "$TMP/bin/nmcli"
 
 # --- the position has to be a real one --------------------------------------
 

@@ -128,6 +128,11 @@ def save_stats(s):
 
 # ---------------------------------------------------------------- wifi
 
+def locally_administered(mac):
+    """True for a MAC address its owner made up rather than bought."""
+    return bool(int(mac[:2], 16) & 0x02)
+
+
 def scan_wifi():
     """Access points in range, as beaconDB may receive them.
 
@@ -161,6 +166,14 @@ def scan_wifi():
         # area it left. These names are what phones call their hotspots.
         if re.search(r"(iphone|android.?ap|mobile.?hotspot|galaxy.*hotspot)",
                      ssid, re.IGNORECASE):
+            continue
+        # The name is whatever the owner typed; the address is not. Phones
+        # and travel routers make up a random, locally administered BSSID
+        # for their hotspot - the second-lowest bit of the first octet set -
+        # where a fixed access point carries its maker's address. Some
+        # fixed ones use such addresses for extra SSIDs too; losing those is
+        # cheap, a moving one in the database is not.
+        if locally_administered(mac):
             continue
         if mac in seen:
             continue

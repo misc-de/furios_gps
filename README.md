@@ -36,7 +36,9 @@ Or the switch under **Contribute to beaconDB** on the GPS page of the app.
 What is sent is the MAC address, channel and signal strength of the networks
 in range, with a GNSS position. What is never sent: network names, hidden
 networks, and anything whose name ends in `_nomap` or `_optout` - beaconDB's
-rules, and the way an access point owner opts out.
+rules, and the way an access point owner opts out. Nor are phone hotspots:
+not by name alone, but by address too - a hotspot makes up its BSSID, and a
+made-up address has the locally administered bit set.
 
 The position has to come from satellites. geoclue can answer from a Wi-Fi
 lookup, and that lookup is answered by beaconDB itself - submitting one would
