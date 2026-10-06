@@ -98,6 +98,78 @@ check "the position is declared as gps, not fused" "yes" \
 check "a report carries at least two access points" "2" \
     "$(sed -n 's/^MIN_APS = //p' "$TOOL")"
 
+# geoclue answers a new client from its last known location, and that can be
+# minutes old. The networks were scanned before the fix was asked for and the
+# fix's own Timestamp was never read: a cached position from across town got
+# paired with the networks in range here. Run, not grepped for.
+py <<'PYEOF'
+import importlib.machinery, importlib.util, os, sys, tempfile, time
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+m.log = lambda *a: None
+now = time.time()
+fix = {"Latitude": 50.0, "Longitude": 8.0, "Accuracy": 5.0, "Altitude": 120.0}
+bad = 0
+for stamp, want, what in [
+        ((int(now) - 300, 0), False, "five minutes before the request"),
+        ((int(now) - 2, 0), False, "two seconds before it"),
+        (None, False, "no timestamp at all"),
+        ((int(now) + 1, 500000), True, "after the request")]:
+    values = dict(fix)
+    if stamp:
+        values["Timestamp"] = stamp
+    got = m.judge_fix(values, not_before=now) is not None
+    ok = got == want
+    bad += not ok
+    print(("  \033[32mok\033[0m   " if ok else "  \033[31mFAIL\033[0m ")
+          + f"a fix taken {what}: {'used' if got else 'refused'}")
+sys.exit(1 if bad else 0)
+PYEOF
+check "a cached fix is refused, a fresh one used" "0" "$?"
+py <<'PYEOF'
+import importlib.machinery, importlib.util, os, sys, tempfile, time
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+m.log = lambda *a: None
+calls = []
+before = [{"macAddress": f"AA:00:00:00:00:{i:02X}"} for i in range(3)]
+after = [{"macAddress": f"BB:00:00:00:00:{i:02X}"} for i in range(3)]
+def scan():
+    calls.append("scan")
+    return after if "fix" in calls else before
+asked = {}
+def fix(not_before, **k):
+    calls.append("fix")
+    asked["not_before"] = not_before
+    return ({"latitude": 50.0, "longitude": 8.0, "accuracy": 5.0,
+             "altitude": 1.0, "source": "gps"}, not_before + 3.0)
+m.scan_wifi, m.gnss_fix = scan, fix
+item = m.measure()
+ok = (calls == ["scan", "fix", "scan"]
+      and item["wifiAccessPoints"] == after
+      and item["timestamp"] == int((asked["not_before"] + 3.0) * 1000))
+sys.exit(0 if ok else 1)
+PYEOF
+check "the networks sent are scanned after the fix, stamped with its time" "0" "$?"
+py <<'PYEOF'
+import importlib.machinery, importlib.util, os, sys, tempfile, time
+os.environ["CONTRIB_STATE"] = tempfile.mkdtemp()
+ld = importlib.machinery.SourceFileLoader("c", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", ld))
+ld.exec_module(m)
+m.log = lambda *a: None
+m.scan_wifi = lambda: [{"macAddress": f"AA:00:00:00:00:{i:02X}"} for i in range(3)]
+m.gnss_fix = lambda not_before, **k: (
+    {"latitude": 50.0, "longitude": 8.0, "accuracy": 5.0, "altitude": 1.0,
+     "source": "gps"}, time.time() - m.SCAN_AFTER_FIX_S - 5)
+sys.exit(0 if m.measure() is None and m.queue_read() == [] else 1)
+PYEOF
+check "a scan too long after the fix is not paired with it" "0" "$?"
+
 # --- not being a burden -----------------------------------------------------
 
 printf '\n\033[1m  what keeps this off the server'"'"'s back\033[0m\n'

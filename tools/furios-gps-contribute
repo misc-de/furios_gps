@@ -95,6 +95,10 @@ BATCH = int(os.environ.get("CONTRIB_BATCH", "12"))
 QUEUE_MAX = int(os.environ.get("CONTRIB_QUEUE_MAX", "500"))
 # ichnaea wants at least two access points in a wifi-only report.
 MIN_APS = 2
+# The networks are paired with the fix, so they have to be scanned where the
+# fix was taken: after it, and soon after. At walking pace 20 s is a few tens
+# of metres; in a car it is not, which is why it is not longer.
+SCAN_AFTER_FIX_S = float(os.environ.get("CONTRIB_SCAN_AFTER_FIX", "20"))
 # Backoff after a refused or failed submission, in seconds. It gives up for
 # this run rather than walking the list again - the queue keeps.
 BACKOFF_S = [60, 300, 1800]
@@ -178,11 +182,13 @@ def scan_wifi():
 
 # ---------------------------------------------------------------- position
 
-def gnss_fix(wait_s=45):
-    """One position from geoclue, but only if it is a GNSS one.
+def gnss_fix(not_before, wait_s=45):
+    """One position from geoclue, but only if it is a fresh GNSS one.
 
-    Returns None rather than a doubtful fix. Sending a Wi-Fi-derived position
-    would hand beaconDB its own answer back as an observation.
+    Returns (position, fix time) or None rather than a doubtful fix. Sending a
+    Wi-Fi-derived position would hand beaconDB its own answer back as an
+    observation; sending a stale one pairs today's networks with yesterday's
+    place.
     """
     bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
 
@@ -233,6 +239,29 @@ def gnss_fix(wait_s=45):
 
     if not result:
         return None
+    return judge_fix(result, not_before)
+
+
+def judge_fix(result, not_before):
+    """(position, fix time in seconds) from geoclue's Location properties,
+    or None for a fix that must not be paired with a scan.
+
+    geoclue answers a new client from its last known location when it has one,
+    and that answer can be minutes old - from before the bus, before the
+    building, before the walk. Its Timestamp says when it was taken; a fix
+    from before not_before (the moment it was asked for) is somebody else's
+    position as far as the networks scanned now are concerned.
+    """
+    stamp = result.get("Timestamp")
+    try:
+        taken = float(stamp[0]) + float(stamp[1]) / 1e6
+    except (TypeError, ValueError, IndexError):
+        log("skipped: the fix carries no timestamp - its age is unknown")
+        return None
+    if taken < not_before:
+        log(f"skipped: the fix is {not_before - taken:.0f} s older than the "
+            "request - a cached position, not this one")
+        return None
 
     accuracy = float(result.get("Accuracy", 1e9))
     altitude = result.get("Altitude")
@@ -256,7 +285,7 @@ def gnss_fix(wait_s=45):
         value = result.get(key)
         if value is not None and value >= 0:
             pos[name] = float(value)
-    return pos
+    return pos, taken
 
 
 def distance_m(a, b):
@@ -456,8 +485,12 @@ def measure(dry=False):
                 f"waiting {int((next_try - time.time())/60)} min")
             return None
 
-    pos = gnss_fix()
-    if pos is None:
+    # The scan above only decides whether the receiver is worth switching on.
+    # The networks sent are scanned again after the fix: the fix can take up
+    # to 45 s, and pairing it with networks from before it would put them
+    # wherever the phone had got to by then.
+    fix = gnss_fix(not_before=time.time())
+    if fix is None:
         s["gnss_misses"] = misses + 1
         # 3, 6, 12 ... up to an hour between attempts.
         delay = min(3600, INTERVAL_S * (2 ** min(misses, 5)))
@@ -466,6 +499,18 @@ def measure(dry=False):
         return None
     s["gnss_misses"] = 0
     s.pop("gnss_next_try", None)
+    pos, taken = fix
+
+    aps = scan_wifi()
+    late = time.time() - taken
+    if late > SCAN_AFTER_FIX_S:
+        log(f"skipped: the scan finished {late:.0f} s after the fix")
+        save_stats(s)
+        return None
+    if len(aps) < MIN_APS:
+        log(f"skipped: {len(aps)} usable access points at the fix, need {MIN_APS}")
+        save_stats(s)
+        return None
 
     if last:
         moved = distance_m((last[0], last[1]), (pos["latitude"], pos["longitude"]))
@@ -474,7 +519,7 @@ def measure(dry=False):
             log(f"skipped: {moved:.0f} m from the last one, {age/60:.0f} min ago")
             return None
 
-    item = {"timestamp": int(time.time() * 1000),
+    item = {"timestamp": int(taken * 1000),
             "position": pos, "wifiAccessPoints": aps}
     if dry:
         log(json.dumps(item, indent=2))

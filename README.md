@@ -43,6 +43,9 @@ lookup, and that lookup is answered by beaconDB itself - submitting one would
 hand the database its own estimate back as an observation. A fix is only used
 when it carries an altitude, which network-derived positions do not, and when
 it is accurate to 25 m or better.
+It also has to be new: geoclue hands a client its last known position first,
+and that can be minutes old, so a fix taken before it was asked for is
+refused. The networks sent with it are scanned after the fix, not before.
 
 Submissions go out over Wi-Fi only, batched, minutes apart, and a refusal is
 dropped rather than retried. See [NOTICE](NOTICE) for what this means for the
